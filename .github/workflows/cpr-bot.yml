@@ -34,7 +34,14 @@ jobs:
         FYERS_REDIRECT_URI: "https://trade.fyers.in/api-login/redirect-uri/index.html"
       run: |
         echo "Starting CPR Alert Bot..."
-        timeout 6h python cpr_bot.py || echo "Bot completed market session"
+        echo "Current time: $(date)"
+        echo "IST time: $(TZ='Asia/Kolkata' date)"
+        
+        # Run bot with timeout and ensure step completes
+        timeout --preserve-status 6h python cpr_bot.py || true
+        
+        echo "Bot execution finished at: $(date)"
+        echo "Step completed, proceeding to next step..."
     
     - name: Upload logs
       if: always()

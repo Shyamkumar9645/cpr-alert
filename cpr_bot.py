@@ -770,7 +770,9 @@ class FyersService:
                 "cont_flag": "1"
             }
             
+            logger.debug(f"Making API call for {symbol} latest candle")
             response = self.client.history(data=data)
+            logger.debug(f"API response for {symbol}: {response.get('s', 'unknown')}")
             
             if response.get('s') == 'ok' and response.get('candles'):
                 candles = response['candles']
@@ -984,6 +986,7 @@ class CPRAlertBot:
         while self.is_running:
             try:
                 market_status = self.market_checker.get_market_status()
+                logger.info(f"Market status: {market_status}")
                 
                 if market_status == MarketStatus.OPEN:
                     self._check_level_touches()
