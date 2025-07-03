@@ -137,18 +137,38 @@ class ConfigManager:
     @staticmethod
     def _load_from_environment() -> Dict[str, Any]:
         """Load configuration from environment variables (GitHub deployment)."""
-        config = {
-            "fyers": {
-                "app_id": os.getenv("FYERS_APP_ID"),
-                "secret_key": os.getenv("FYERS_SECRET_KEY"),
-                "redirect_uri": os.getenv("FYERS_REDIRECT_URI", "https://trade.fyers.in/api-login/redirect-uri/index.html"),
-                "access_token": os.getenv("FYERS_ACCESS_TOKEN")
-            },
-            "telegram": {
-                "bot_token": os.getenv("TELEGRAM_BOT_TOKEN"),
-                "chat_id": os.getenv("TELEGRAM_CHAT_ID")
-            },
-            "assets": [
+        # Load configurable stocks from environment variable
+        stocks_config = os.getenv("STOCKS_CONFIG", "")
+        assets = []
+        
+        if stocks_config:
+            # Parse comma-separated stock list: "NSE:NIFTY50-INDEX:NIFTY 50,NSE:RELIANCE-EQ:RELIANCE"
+            try:
+                for stock_entry in stocks_config.split(','):
+                    if ':' in stock_entry:
+                        parts = stock_entry.strip().split(':')
+                        if len(parts) >= 3:
+                            exchange = parts[0]
+                            symbol_part = parts[1]
+                            name = ':'.join(parts[2:])  # Join remaining parts as name
+                            symbol = f"{exchange}:{symbol_part}"
+                            assets.append({"symbol": symbol, "name": name})
+                        elif len(parts) == 2:
+                            # If no name provided, use symbol as name
+                            exchange = parts[0]
+                            symbol_part = parts[1]
+                            symbol = f"{exchange}:{symbol_part}"
+                            name = symbol_part.replace('-EQ', '').replace('-INDEX', '')
+                            assets.append({"symbol": symbol, "name": name})
+                logger.info(f"Loaded {len(assets)} stocks from STOCKS_CONFIG environment variable")
+            except Exception as e:
+                logger.error(f"Error parsing STOCKS_CONFIG: {e}")
+                assets = []
+        
+        # Fallback to default major stocks if no config provided or parsing failed
+        if not assets:
+            logger.info("Using default stock list (no STOCKS_CONFIG provided)")
+            assets = [
                 {"symbol": "NSE:NIFTY50-INDEX", "name": "NIFTY 50"},
                 {"symbol": "NSE:NIFTYBANK-INDEX", "name": "BANK NIFTY"},
                 {"symbol": "NSE:FINNIFTY-INDEX", "name": "NIFTY FINANCIAL"},
@@ -210,7 +230,20 @@ class ConfigManager:
                 {"symbol": "NSE:SAIL-EQ", "name": "SAIL"},
                 {"symbol": "NSE:ZEEL-EQ", "name": "ZEE ENTERTAINMENT"},
                 {"symbol": "NSE:VEDL-EQ", "name": "VEDANTA"}
-            ],
+            ]
+        
+        config = {
+            "fyers": {
+                "app_id": os.getenv("FYERS_APP_ID"),
+                "secret_key": os.getenv("FYERS_SECRET_KEY"),
+                "redirect_uri": os.getenv("FYERS_REDIRECT_URI", "https://trade.fyers.in/api-login/redirect-uri/index.html"),
+                "access_token": os.getenv("FYERS_ACCESS_TOKEN")
+            },
+            "telegram": {
+                "bot_token": os.getenv("TELEGRAM_BOT_TOKEN"),
+                "chat_id": os.getenv("TELEGRAM_CHAT_ID")
+            },
+            "assets": assets,
             "alert_settings": {
                 "market_hours": {
                     "start": "09:15",
@@ -1101,6 +1134,48 @@ class CPRAlertBot:
             logger.warning(f"⚠️ Check interval {self.check_interval}s may cause spam alerts. Recommended: 30s+")
         if 's' in self.preferred_resolution and int(self.preferred_resolution.replace('s', '')) < 60:
             logger.warning(f"⚠️ Resolution {self.preferred_resolution} may cause spam alerts. Recommended: 1m+")
+        
+        # Send startup notification
+        self._send_startup_alert()
+    
+    def _send_startup_alert(self):
+        """Send startup notification to Telegram."""
+        try:
+            startup_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            num_assets = len(self.config.get('assets', []))
+            
+            # Determine if using custom or default stock list
+            stocks_config = os.getenv("STOCKS_CONFIG", "")
+            stock_source = "custom configuration" if stocks_config else "default list"
+            
+            message = f"🚀 **CPR Alert Bot Started**\n\n"
+            message += f"📅 **Startup Time:** `{startup_time}`\n"
+            message += f"📊 **Assets Monitored:** {num_assets} stocks\n"
+            message += f"📋 **Stock Source:** {stock_source}\n"
+            message += f"⚡ **Resolution:** {self.preferred_resolution}\n"
+            message += f"🔄 **Check Interval:** {self.check_interval}s\n"
+            message += f"🕕 **Cooldown Period:** {self.cooldown_manager.cooldown_minutes}min\n"
+            message += f"🎯 **Tolerance:** {self.touch_detector.tolerance_percent}%\n\n"
+            
+            # Add first few stocks being monitored
+            if num_assets > 0:
+                message += f"**Sample Assets:**\n"
+                sample_assets = self.config.get('assets', [])[:5]  # First 5 stocks
+                for asset in sample_assets:
+                    message += f"• {asset['name']} ({asset['symbol']})\n"
+                if num_assets > 5:
+                    message += f"• ... and {num_assets - 5} more\n"
+            
+            message += f"\n✅ **Bot is ready for monitoring!**"
+            
+            success = self.telegram_service.send_alert(message)
+            if success:
+                logger.info("📱 Startup alert sent to Telegram")
+            else:
+                logger.warning("⚠️ Failed to send startup alert to Telegram")
+                
+        except Exception as e:
+            logger.error(f"Error sending startup alert: {e}")
     
     def initialize_daily_levels(self) -> bool:
         """Initialize CPR levels for all configured assets."""
