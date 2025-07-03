@@ -648,7 +648,7 @@ class TelegramService:
 class FyersService:
     """Enhanced Fyers API service with improved rate limiting and error handling."""
     
-    def __init__(self, config: Dict[str, Any]):
+    def __init__(self, config: Dict[str, Any], telegram_service=None):
         self.client = fyersModel.FyersModel(
             token=config.get('access_token'),
             log_path=".",
@@ -658,6 +658,7 @@ class FyersService:
         self.last_call_time = 0
         self.call_count = 0
         self.call_window_start = time.time()
+        self.telegram_service = telegram_service
         self.max_calls_per_minute = 150
         self.call_interval = 0.1
         
@@ -771,6 +772,9 @@ class FyersService:
             }
             
             logger.info(f"Making API call for {symbol} latest candle")
+            # Send telegram notification for API call
+            if self.telegram_service:
+                self.telegram_service.send_alert(f"📡 API Call: {symbol} - {datetime.now().strftime('%H:%M:%S')}")
             response = self.client.history(data=data)
             logger.info(f"API response for {symbol}: {response.get('s', 'unknown')}")
             
@@ -894,8 +898,8 @@ class CPRAlertBot:
     
     def __init__(self):
         self.config = ConfigManager.load_config()
-        self.fyers_service = FyersService(self.config['fyers'])
         self.telegram_service = TelegramService(self.config['telegram'])
+        self.fyers_service = FyersService(self.config['fyers'], self.telegram_service)
         self.db_service = DatabaseService(DB_FILE)
         
         alert_settings = self.config.get('alert_settings', {})
