@@ -643,19 +643,31 @@ class TelegramService:
         if time_since_last < self.min_interval:
             time.sleep(self.min_interval - time_since_last)
         
-        payload = {
-            'chat_id': self.chat_id,
-            'text': message[:4096],
-            'parse_mode': 'Markdown'
-        }
-        
+        # Try with Markdown first, then fallback to plain text
         for attempt in range(max_retries):
             try:
+                # First attempt with Markdown
+                if attempt == 0:
+                    payload = {
+                        'chat_id': self.chat_id,
+                        'text': message[:4096],
+                        'parse_mode': 'Markdown'
+                    }
+                else:
+                    # Fallback: Remove markdown formatting and send as plain text
+                    clean_message = self._clean_markdown(message)
+                    payload = {
+                        'chat_id': self.chat_id,
+                        'text': clean_message[:4096]
+                        # No parse_mode for plain text
+                    }
+                
                 response = requests.post(self.base_url, data=payload, timeout=10)
                 response.raise_for_status()
                 self.last_message_time = time.time()
                 self.burst_count += 1
-                logger.info(f"Alert sent successfully (attempt {attempt + 1})")
+                parse_mode = "Markdown" if attempt == 0 else "Plain Text"
+                logger.info(f"Alert sent successfully (attempt {attempt + 1}, {parse_mode})")
                 return True
                 
             except requests.exceptions.RequestException as e:
@@ -665,6 +677,16 @@ class TelegramService:
         
         logger.error(f"Failed to send alert after {max_retries} attempts")
         return False
+    
+    def _clean_markdown(self, text: str) -> str:
+        """Remove markdown formatting for fallback plain text sending."""
+        import re
+        # Remove markdown formatting
+        text = re.sub(r'\*\*(.*?)\*\*', r'\1', text)  # **bold** -> bold
+        text = re.sub(r'\*(.*?)\*', r'\1', text)      # *italic* -> italic
+        text = re.sub(r'`(.*?)`', r'\1', text)        # `code` -> code
+        text = re.sub(r'_([^_]+)_', r'\1', text)      # _underline_ -> underline
+        return text
 
     def send_formatted_alert(self, asset_name: str, level_type: LevelType, 
                            level_value: float, candle: CandleData, 
@@ -1702,11 +1724,30 @@ def test_connection():
         
         print("\nTesting Telegram connection...")
         telegram_service = TelegramService(config['telegram'])
-        success = telegram_service.send_alert("🧪 CPR Bot connection test")
+        
+        # Test simple message first
+        print("Testing simple message...")
+        success = telegram_service.send_alert("🧪 Simple test message")
         if success:
-            print("✅ Telegram connection successful")
+            print("✅ Simple message successful")
         else:
-            print("❌ Telegram connection failed")
+            print("❌ Simple message failed")
+            
+        # Test formatted message
+        print("Testing formatted message...")
+        test_formatted_msg = """🚀 **CPR Alert Bot Test**
+
+📅 **Test Time:** `2025-07-03 18:55:00`
+📊 **Status:** Testing markdown formatting
+🎯 **Result:** If you see this, formatting works!
+
+✅ **Connection test completed**"""
+        
+        success = telegram_service.send_alert(test_formatted_msg)
+        if success:
+            print("✅ Formatted message successful")
+        else:
+            print("❌ Formatted message failed")
             
     except Exception as e:
         print(f"❌ Connection test failed: {e}")
