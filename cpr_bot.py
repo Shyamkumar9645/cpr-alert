@@ -649,8 +649,11 @@ class FyersService:
     """Enhanced Fyers API service with improved rate limiting and error handling."""
     
     def __init__(self, config: Dict[str, Any]):
-        self.client = fyersModel.FyersModel()
-        self.client.set_token(config.get('access_token'))
+        self.client = fyersModel.FyersModel(
+            token=config.get('access_token'),
+            log_path=".",
+            is_async=False
+        )
         
         self.last_call_time = 0
         self.call_count = 0
