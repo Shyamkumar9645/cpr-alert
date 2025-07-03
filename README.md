@@ -1,4 +1,4 @@
-# CPR Alert Bot - Render Deployment
+# CPR Alert Bot - Free Deployment Options
 
 A real-time stock market CPR (Central Pivot Range) level alert bot that monitors Indian stocks and sends alerts via Telegram when price touches key support/resistance levels.
 
@@ -11,7 +11,28 @@ A real-time stock market CPR (Central Pivot Range) level alert bot that monitors
 - 🚀 Optimized for Fyers API limits (200 calls/min)
 - 💾 SQLite database for alert history
 
-## Render Deployment
+## 🆓 FREE Deployment Options
+
+### Option 1: GitHub Actions (100% FREE - RECOMMENDED)
+
+**Why GitHub Actions?**
+- ✅ **Completely FREE** for public repositories
+- ✅ **Unlimited minutes** for public repos
+- ✅ **No credit card required**
+- ✅ **Automatic scheduling** during market hours
+- ✅ **6+ hours daily runtime** (perfect for 9:15 AM - 3:30 PM IST)
+
+📖 **[See GITHUB_DEPLOYMENT.md for complete setup guide](GITHUB_DEPLOYMENT.md)**
+
+**Quick Setup:**
+1. Create public GitHub repository
+2. Add secrets (API keys) in repository settings
+3. Enable GitHub Actions (automatic)
+4. Bot runs automatically Monday-Friday at 9:10 AM IST
+
+---
+
+### Option 2: Render Deployment (750 hours/month free)
 
 ### 1. Prerequisites
 
