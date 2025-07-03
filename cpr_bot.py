@@ -770,9 +770,9 @@ class FyersService:
                 "cont_flag": "1"
             }
             
-            logger.debug(f"Making API call for {symbol} latest candle")
+            logger.info(f"Making API call for {symbol} latest candle")
             response = self.client.history(data=data)
-            logger.debug(f"API response for {symbol}: {response.get('s', 'unknown')}")
+            logger.info(f"API response for {symbol}: {response.get('s', 'unknown')}")
             
             if response.get('s') == 'ok' and response.get('candles'):
                 candles = response['candles']
