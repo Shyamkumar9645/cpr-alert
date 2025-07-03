@@ -991,10 +991,10 @@ class CPRAlertBot:
                 if market_status == MarketStatus.OPEN:
                     self._check_level_touches()
                 elif market_status == MarketStatus.CLOSED:
+                    logger.info("Market is closed but continuing monitoring for testing...")
+                    self._check_level_touches()  # Continue monitoring even when closed
                     if datetime.now().hour == 6 and datetime.now().minute < 5:
                         self._reset_daily_data()
-                    time.sleep(300)
-                    continue
                 
                 time.sleep(self.check_interval)
                 
