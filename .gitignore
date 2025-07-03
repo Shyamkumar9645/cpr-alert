@@ -47,8 +47,8 @@ logs/
 .DS_Store
 Thumbs.db
 
-# Railway
-.railway/
+# Render
+.render/
 
 # Config files with secrets
 config*.json

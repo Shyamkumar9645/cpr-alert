@@ -1,0 +1,22 @@
+services:
+  - type: worker
+    name: cpr-alert-bot
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python cpr_bot.py
+    plan: free
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.0
+      - key: FYERS_APP_ID
+        sync: false
+      - key: FYERS_SECRET_KEY
+        sync: false
+      - key: FYERS_ACCESS_TOKEN
+        sync: false
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: TELEGRAM_CHAT_ID
+        sync: false
+      - key: FYERS_REDIRECT_URI
+        value: https://trade.fyers.in/api-login/redirect-uri/index.html
