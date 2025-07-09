@@ -12,9 +12,11 @@ import schedule
 from threading import Thread, Lock
 import sqlite3
 from pathlib import Path
+import sys
+import signal
+import subprocess
 
 # --- Enhanced Configuration ---
-CONFIG_FILE = Path(__file__).parent / 'config1.json'
 DB_FILE = Path(__file__).parent / 'cpr_alerts.db'
 LOG_FILE = Path(__file__).parent / 'logs' / f'cpr_bot_{datetime.now().strftime("%Y%m%d")}.log'
 
@@ -33,6 +35,9 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # --- Data Classes and Enums ---
+
+
+
 
 class MarketStatus(Enum):
     OPEN = "open"
@@ -102,200 +107,86 @@ class AssetData:
 # --- Helper Functions and Classes ---
 
 class ConfigManager:
-    """Manages configuration loading and validation with fallback to environment variables."""
+    """Manages configuration loading and validation."""
     
     @staticmethod
     def load_config() -> Dict[str, Any]:
-        """Loads and validates configuration from JSON file or environment variables."""
-        try:
-            # Try to load from JSON file first (for local development)
-            if CONFIG_FILE.exists():
-                return ConfigManager._load_from_file()
-            else:
-                # Fallback to environment variables (for GitHub deployment)
-                return ConfigManager._load_from_environment()
-            
-        except Exception as e:
-            logger.error(f"Error loading configuration: {e}")
-            raise
-    
-    @staticmethod
-    def _load_from_file() -> Dict[str, Any]:
-        """Load configuration from JSON file."""
-        try:
-            with open(CONFIG_FILE, 'r') as f:
-                config = json.load(f)
-            
-            ConfigManager._validate_config(config)
-            logger.info("Configuration loaded from JSON file")
-            return config
-            
-        except json.JSONDecodeError as e:
-            logger.error(f"Error decoding JSON from config file: {e}")
-            raise
-    
-    @staticmethod
-    def _load_from_environment() -> Dict[str, Any]:
-        """Load configuration from environment variables (GitHub deployment)."""
-        # Load configurable stocks from environment variable
-        stocks_config = os.getenv("STOCKS_CONFIG", "")
-        assets = []
-        
-        if stocks_config:
-            # Parse comma-separated stock list: "NSE:NIFTY50-INDEX:NIFTY 50,NSE:RELIANCE-EQ:RELIANCE"
-            try:
-                for stock_entry in stocks_config.split(','):
-                    if ':' in stock_entry:
-                        parts = stock_entry.strip().split(':')
-                        if len(parts) >= 3:
-                            exchange = parts[0]
-                            symbol_part = parts[1]
-                            name = ':'.join(parts[2:])  # Join remaining parts as name
-                            symbol = f"{exchange}:{symbol_part}"
-                            assets.append({"symbol": symbol, "name": name})
-                        elif len(parts) == 2:
-                            # If no name provided, use symbol as name
-                            exchange = parts[0]
-                            symbol_part = parts[1]
-                            symbol = f"{exchange}:{symbol_part}"
-                            name = symbol_part.replace('-EQ', '').replace('-INDEX', '')
-                            assets.append({"symbol": symbol, "name": name})
-                logger.info(f"Loaded {len(assets)} stocks from STOCKS_CONFIG environment variable")
-            except Exception as e:
-                logger.error(f"Error parsing STOCKS_CONFIG: {e}")
-                assets = []
-        
-        # Fallback to default major stocks if no config provided or parsing failed
-        if not assets:
-            logger.info("Using default stock list (no STOCKS_CONFIG provided)")
-            assets = [
-                {"symbol": "NSE:NIFTY50-INDEX", "name": "NIFTY 50"},
-                {"symbol": "NSE:NIFTYBANK-INDEX", "name": "BANK NIFTY"},
-                {"symbol": "NSE:FINNIFTY-INDEX", "name": "NIFTY FINANCIAL"},
-                {"symbol": "BSE:SENSEX-INDEX", "name": "BSE SENSEX"},
-                {"symbol": "NSE:RELIANCE-EQ", "name": "RELIANCE"},
-                {"symbol": "NSE:HDFCBANK-EQ", "name": "HDFC BANK"},
-                {"symbol": "NSE:ICICIBANK-EQ", "name": "ICICI BANK"},
-                {"symbol": "NSE:AXISBANK-EQ", "name": "AXIS BANK"},
-                {"symbol": "NSE:SBIN-EQ", "name": "STATE BANK"},
-                {"symbol": "NSE:KOTAKBANK-EQ", "name": "KOTAK BANK"},
-                {"symbol": "NSE:INDUSINDBK-EQ", "name": "INDUSIND BANK"},
-                {"symbol": "NSE:FEDERALBNK-EQ", "name": "FEDERAL BANK"},
-                {"symbol": "NSE:TCS-EQ", "name": "TCS"},
-                {"symbol": "NSE:INFY-EQ", "name": "INFOSYS"},
-                {"symbol": "NSE:HCLTECH-EQ", "name": "HCL TECH"},
-                {"symbol": "NSE:TECHM-EQ", "name": "TECH MAHINDRA"},
-                {"symbol": "NSE:WIPRO-EQ", "name": "WIPRO"},
-                {"symbol": "NSE:LTIM-EQ", "name": "LTI MINDTREE"},
-                {"symbol": "NSE:BAJFINANCE-EQ", "name": "BAJAJ FINANCE"},
-                {"symbol": "NSE:BAJAJFINSV-EQ", "name": "BAJAJ FINSERV"},
-                {"symbol": "NSE:SHRIRAMFIN-EQ", "name": "SHRIRAM FINANCE"},
-                {"symbol": "NSE:TATAMOTORS-EQ", "name": "TATA MOTORS"},
-                {"symbol": "NSE:M&M-EQ", "name": "MAHINDRA"},
-                {"symbol": "NSE:MARUTI-EQ", "name": "MARUTI"},
-                {"symbol": "NSE:BAJAJ-AUTO-EQ", "name": "BAJAJ AUTO"},
-                {"symbol": "NSE:EICHERMOT-EQ", "name": "EICHER MOTORS"},
-                {"symbol": "NSE:HEROMOTOCO-EQ", "name": "HERO MOTOCORP"},
-                {"symbol": "NSE:TATASTEEL-EQ", "name": "TATA STEEL"},
-                {"symbol": "NSE:JSWSTEEL-EQ", "name": "JSW STEEL"},
-                {"symbol": "NSE:HINDALCO-EQ", "name": "HINDALCO"},
-                {"symbol": "NSE:COALINDIA-EQ", "name": "COAL INDIA"},
-                {"symbol": "NSE:ONGC-EQ", "name": "ONGC"},
-                {"symbol": "NSE:IOC-EQ", "name": "IOC"},
-                {"symbol": "NSE:BPCL-EQ", "name": "BPCL"},
-                {"symbol": "NSE:ADANIENT-EQ", "name": "ADANI ENT"},
-                {"symbol": "NSE:ADANIPORTS-EQ", "name": "ADANI PORTS"},
-                {"symbol": "NSE:LT-EQ", "name": "L&T"},
-                {"symbol": "NSE:POWERGRID-EQ", "name": "POWER GRID"},
-                {"symbol": "NSE:NTPC-EQ", "name": "NTPC"},
-                {"symbol": "NSE:SUNPHARMA-EQ", "name": "SUN PHARMA"},
-                {"symbol": "NSE:DRREDDY-EQ", "name": "DR REDDY"},
-                {"symbol": "NSE:CIPLA-EQ", "name": "CIPLA"},
-                {"symbol": "NSE:DIVISLAB-EQ", "name": "DIVI'S LAB"},
-                {"symbol": "NSE:APOLLOHOSP-EQ", "name": "APOLLO HOSP"},
-                {"symbol": "NSE:HINDUNILVR-EQ", "name": "HINDUSTAN UNILEVER"},
-                {"symbol": "NSE:ITC-EQ", "name": "ITC"},
-                {"symbol": "NSE:NESTLEIND-EQ", "name": "NESTLE"},
-                {"symbol": "NSE:BRITANNIA-EQ", "name": "BRITANNIA"},
-                {"symbol": "NSE:ASIANPAINT-EQ", "name": "ASIAN PAINTS"},
-                {"symbol": "NSE:ULTRACEMC0-EQ", "name": "ULTRATECH CEMENT"},
-                {"symbol": "NSE:GRASIM-EQ", "name": "GRASIM"},
-                {"symbol": "NSE:TITAN-EQ", "name": "TITAN"},
-                {"symbol": "NSE:TRENT-EQ", "name": "TRENT"},
-                {"symbol": "NSE:BHARTIARTL-EQ", "name": "BHARTI AIRTEL"},
-                {"symbol": "NSE:BANKBARODA-EQ", "name": "BANK OF BARODA"},
-                {"symbol": "NSE:PNB-EQ", "name": "PNB"},
-                {"symbol": "NSE:CANBK-EQ", "name": "CANARA BANK"},
-                {"symbol": "NSE:IRCTC-EQ", "name": "IRCTC"},
-                {"symbol": "NSE:SAIL-EQ", "name": "SAIL"},
-                {"symbol": "NSE:ZEEL-EQ", "name": "ZEE ENTERTAINMENT"},
-                {"symbol": "NSE:VEDL-EQ", "name": "VEDANTA"}
-            ]
-        
+        """Loads configuration from environment variables."""
         config = {
-            "fyers": {
-                "app_id": os.getenv("FYERS_APP_ID"),
-                "secret_key": os.getenv("FYERS_SECRET_KEY"),
-                "redirect_uri": os.getenv("FYERS_REDIRECT_URI", "https://trade.fyers.in/api-login/redirect-uri/index.html"),
-                "access_token": os.getenv("FYERS_ACCESS_TOKEN")
+            'fyers': {
+                'app_id': os.getenv('FYERS_APP_ID'),
+                'access_token': os.getenv('FYERS_ACCESS_TOKEN')
             },
-            "telegram": {
-                "bot_token": os.getenv("TELEGRAM_BOT_TOKEN"),
-                "chat_id": os.getenv("TELEGRAM_CHAT_ID")
+            'telegram': {
+                'bot_token': os.getenv('TELEGRAM_BOT_TOKEN'),
+                'chat_id': os.getenv('TELEGRAM_CHAT_ID')
             },
-            "assets": assets,
-            "alert_settings": {
-                "market_hours": {
-                    "start": "09:15",
-                    "end": "15:30",
-                    "pre_market_start": "09:00",
-                    "post_market_end": "15:45"
-                },
-                "check_interval_seconds": 60,
-                "tolerance_percent": 0.15,
-                "cooldown_minutes": 30,
-                "preferred_resolution": "1",
-                "focus_on_key_levels": True,
-                "min_volume_threshold": 0,
-                "enable_spam_prevention": True,
-                "strict_level_crossing": True
+            'assets': [
+                {'symbol': 'NSE:NIFTY50-INDEX', 'name': 'NIFTY 50', 'type': 'index', 'category': 'INDEX'},
+                {'symbol': 'NSE:NIFTYBANK-INDEX', 'name': 'BANK NIFTY', 'type': 'index', 'category': 'INDEX'},
+                {'symbol': 'NSE:FINNIFTY-INDEX', 'name': 'NIFTY FINANCIAL', 'type': 'index', 'category': 'INDEX'},
+                {'symbol': 'NSE:RELIANCE-EQ', 'name': 'RELIANCE', 'type': 'stock', 'category': 'ENERGY'},
+                {'symbol': 'NSE:HDFCBANK-EQ', 'name': 'HDFC BANK', 'type': 'stock', 'category': 'BANKING'},
+                {'symbol': 'NSE:ICICIBANK-EQ', 'name': 'ICICI BANK', 'type': 'stock', 'category': 'BANKING'},
+                {'symbol': 'NSE:AXISBANK-EQ', 'name': 'AXIS BANK', 'type': 'stock', 'category': 'BANKING'},
+                {'symbol': 'NSE:SBIN-EQ', 'name': 'STATE BANK', 'type': 'stock', 'category': 'BANKING'},
+                {'symbol': 'NSE:TATAMOTORS-EQ', 'name': 'TATA MOTORS', 'type': 'stock', 'category': 'AUTO'},
+                {'symbol': 'NSE:BAJFINANCE-EQ', 'name': 'BAJAJ FINANCE', 'type': 'stock', 'category': 'FINANCE'}
+            ],
+            'alert_settings': {
+                'check_interval_seconds': int(os.getenv('CHECK_INTERVAL_SECONDS', '20')),
+                'tolerance_percent': float(os.getenv('TOLERANCE_PERCENT', '0.05')),
+                'cooldown_minutes': int(os.getenv('COOLDOWN_MINUTES', '30')),
+                'preferred_resolution': os.getenv('PREFERRED_RESOLUTION', '1'),
+                'focus_on_key_levels': os.getenv('FOCUS_ON_KEY_LEVELS', 'true').lower() == 'true',
+                'min_volume_threshold': int(os.getenv('MIN_VOLUME_THRESHOLD', '5000')),
+                'enable_spam_prevention': os.getenv('ENABLE_SPAM_PREVENTION', 'true').lower() == 'true',
+                'strict_level_crossing': os.getenv('STRICT_LEVEL_CROSSING', 'true').lower() == 'true',
+                'market_hours': {
+                    'start': os.getenv('MARKET_START_TIME', '09:15'),
+                    'end': os.getenv('MARKET_END_TIME', '15:30'),
+                    'pre_market_start': os.getenv('PRE_MARKET_START', '09:00'),
+                    'post_market_end': os.getenv('POST_MARKET_END', '15:45')
+                }
+            },
+            'advanced_settings': {
+                'enable_volume_analysis': os.getenv('ENABLE_VOLUME_ANALYSIS', 'true').lower() == 'true',
+                'min_volume_threshold': int(os.getenv('MIN_VOLUME_THRESHOLD', '5000')),
+                'enable_strength_filtering': os.getenv('ENABLE_STRENGTH_FILTERING', 'true').lower() == 'true',
+                'min_touch_strength': float(os.getenv('MIN_TOUCH_STRENGTH', '0.4')),
+                'enable_trend_analysis': os.getenv('ENABLE_TREND_ANALYSIS', 'false').lower() == 'true',
+                'enable_volatility_filter': os.getenv('ENABLE_VOLATILITY_FILTER', 'true').lower() == 'true'
+            },
+            'spam_prevention': {
+                'min_candle_range_ratio': float(os.getenv('MIN_CANDLE_RANGE_RATIO', '0.3')),
+                'max_alerts_per_hour': int(os.getenv('MAX_ALERTS_PER_HOUR', '12')),
+                'require_volume_confirmation': os.getenv('REQUIRE_VOLUME_CONFIRMATION', 'true').lower() == 'true',
+                'strict_crossing_validation': os.getenv('STRICT_CROSSING_VALIDATION', 'true').lower() == 'true',
+                'crossing_tolerance_percent': float(os.getenv('CROSSING_TOLERANCE_PERCENT', '0.02'))
             }
         }
         
-        # Validate required environment variables
-        required_vars = [
-            "FYERS_APP_ID", "FYERS_SECRET_KEY", "FYERS_ACCESS_TOKEN",
-            "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID"
-        ]
-        
-        missing_vars = []
-        for var in required_vars:
-            if not os.getenv(var):
-                missing_vars.append(var)
-        
-        if missing_vars:
-            logger.error(f"Missing required environment variables: {', '.join(missing_vars)}")
-            raise ValueError(f"Missing required environment variables: {', '.join(missing_vars)}")
-        
-        logger.info("Configuration loaded from environment variables")
+        ConfigManager._validate_config(config)
         return config
-    
+
     @staticmethod
     def _validate_config(config: Dict[str, Any]) -> None:
         """Validates the configuration structure."""
-        required_sections = ['fyers', 'telegram', 'assets', 'alert_settings']
-        for section in required_sections:
-            if section not in config:
-                raise ValueError(f"Missing required config section: {section}")
+        # Validate required environment variables
+        required_vars = ['FYERS_APP_ID', 'FYERS_ACCESS_TOKEN', 'TELEGRAM_BOT_TOKEN', 'TELEGRAM_CHAT_ID']
+        missing_vars = [var for var in required_vars if not os.getenv(var)]
+        
+        if missing_vars:
+            raise ValueError(f"Missing required environment variables: {', '.join(missing_vars)}")
         
         # Validate Fyers config
         fyers_config = config['fyers']
-        if not all(key in fyers_config for key in ['app_id', 'access_token']):
+        if not all(key in fyers_config and fyers_config[key] for key in ['app_id', 'access_token']):
             raise ValueError("Missing required Fyers configuration")
         
         # Validate Telegram config
         telegram_config = config['telegram']
-        if not all(key in telegram_config for key in ['bot_token', 'chat_id']):
+        if not all(key in telegram_config and telegram_config[key] for key in ['bot_token', 'chat_id']):
             raise ValueError("Missing required Telegram configuration")
         
         # Validate assets
@@ -360,6 +251,8 @@ class CPRCalculator:
             s1=s1
         )
 
+# --- Touch Detection and Cooldown Classes ---
+
 class LevelTouchDetector:
     """Detects level touches with configurable tolerance and validation."""
     
@@ -376,24 +269,65 @@ class LevelTouchDetector:
         if not candle:
             return False
         
+        # Use much smaller tolerance for actual level touch (0.05% max)
         actual_tolerance_percent = min(self.tolerance_percent, 0.05)
         tolerance = level_value * (actual_tolerance_percent / 100)
         
+        # Check if the candle actually touched the level (not just came close)
+        # The level must be within the candle's high-low range with minimal tolerance
         level_touched = (candle.low - tolerance) <= level_value <= (candle.high + tolerance)
         
+        # Additional check: ensure the touch is meaningful (not just a wick)
         if level_touched:
+            # For support levels (S1), check if price went down to the level
+            # For resistance levels (R1), check if price went up to the level
+            # For pivot, check either direction
             candle_range = candle.high - candle.low
             touch_significance = min(abs(candle.low - level_value), abs(candle.high - level_value))
             
+            # Touch should be within tolerance and significant relative to candle size
             return touch_significance <= tolerance and candle_range > tolerance * 2
         
         return False
+    
+    def get_touch_strength(self, candle: CandleData, level_value: float) -> float:
+        """Calculate how strongly the candle touched the level (0-1)."""
+        if not self.check_level_touch(candle, level_value):
+            return 0.0
+        
+        # Calculate overlap between candle range and level
+        tolerance = level_value * (self.tolerance_percent / 100)
+        level_range = (level_value - tolerance, level_value + tolerance)
+        candle_range = (candle.low, candle.high)
+        
+        overlap_start = max(candle_range[0], level_range[0])
+        overlap_end = min(candle_range[1], level_range[1])
+        overlap_size = overlap_end - overlap_start
+        
+        level_size = level_range[1] - level_range[0]
+        return min(1.0, overlap_size / level_size)
+    
+    def check_volatility_filter(self, candle: CandleData, recent_candles: List[CandleData] = None) -> bool:
+        """Check if the touch is significant enough based on volatility."""
+        if not recent_candles or len(recent_candles) < 3:
+            return True  # Allow if not enough data
+        
+        # Calculate average candle range from recent candles
+        avg_range = sum((c.high - c.low) for c in recent_candles[-5:]) / min(5, len(recent_candles))
+        current_range = candle.high - candle.low
+        
+        # If current candle range is too small compared to average, it might be noise
+        if current_range < avg_range * 0.3:  # Less than 30% of average range
+            return False
+        
+        return True
     
     def check_level_touch_with_filters(self, candle: CandleData, level_value: float, 
                                      recent_candles: List[CandleData] = None, 
                                      min_volume: int = 0, 
                                      level_type: str = None) -> bool:
         """Enhanced level touch detection with spam filters and directional validation."""
+        # Basic level touch check with strict tolerance
         if not self.check_level_touch(candle, level_value):
             return False
         
@@ -404,6 +338,7 @@ class LevelTouchDetector:
         if level_type and recent_candles and len(recent_candles) > 0:
             prev_candle = recent_candles[-1]
             
+            # Use actual level crossing logic instead of just proximity
             if not self.check_actual_level_cross(candle, prev_candle, level_value, level_type):
                 return False
         
@@ -415,19 +350,22 @@ class LevelTouchDetector:
         if not previous_candle:
             return False
         
-        tolerance = level_value * 0.02 / 100
+        tolerance = level_value * 0.02 / 100  # Very tight 0.02% tolerance for crossing
         
-        if level_type == 'S1':
+        if level_type == 'S1':  # Support level
+            # Price should cross from above to below (or bounce off)
             prev_above = previous_candle.low > (level_value + tolerance)
             curr_touches = (current_candle.low - tolerance) <= level_value <= (current_candle.high + tolerance)
             return prev_above and curr_touches
             
-        elif level_type == 'R1':
+        elif level_type == 'R1':  # Resistance level
+            # Price should cross from below to above (or reject from)
             prev_below = previous_candle.high < (level_value - tolerance)
             curr_touches = (current_candle.low - tolerance) <= level_value <= (current_candle.high + tolerance)
             return prev_below and curr_touches
             
-        elif level_type == 'PIVOT':
+        elif level_type == 'PIVOT':  # Pivot level
+            # Price should cross from either side
             prev_above = previous_candle.close > (level_value + tolerance)
             prev_below = previous_candle.close < (level_value - tolerance)
             curr_touches = (current_candle.low - tolerance) <= level_value <= (current_candle.high + tolerance)
@@ -454,10 +392,13 @@ class AlertCooldownManager:
     
     def can_send_alert(self, asset_data: AssetData, level_type: LevelType, current_time: datetime) -> bool:
         """Check if we can send an alert for this stock (any level)."""
+        # If no previous alert for this stock, always allow
         if asset_data.stock_cooldown is None:
             return True
         
         time_since_last_alert = current_time - asset_data.stock_cooldown.last_alert_time
+        
+        # Check if cooldown period has passed
         return time_since_last_alert >= self.cooldown_duration
     
     def record_alert_sent(self, asset_data: AssetData, level_type: LevelType, current_time: datetime):
@@ -485,6 +426,36 @@ class AlertCooldownManager:
             current_count = asset_data.stock_cooldown.levels_touched_during_cooldown.get(level_key, 0)
             asset_data.stock_cooldown.levels_touched_during_cooldown[level_key] = current_count + 1
     
+    def get_pending_touches_summary(self, asset_data: AssetData) -> Tuple[int, List[str]]:
+        """Get summary of pending touches during cooldown."""
+        if asset_data.stock_cooldown is None:
+            return 0, []
+        
+        total_pending = sum(asset_data.stock_cooldown.levels_touched_during_cooldown.values())
+        levels_touched = list(asset_data.stock_cooldown.levels_touched_during_cooldown.keys())
+        
+        return total_pending, levels_touched
+    
+    def get_total_touches(self, asset_data: AssetData) -> int:
+        """Get total touches for this stock today."""
+        if asset_data.stock_cooldown is None:
+            return 0
+        
+        pending_touches = sum(asset_data.stock_cooldown.levels_touched_during_cooldown.values())
+        return asset_data.stock_cooldown.total_touches + pending_touches
+    
+    def get_time_until_next_alert(self, asset_data: AssetData, current_time: datetime) -> Optional[timedelta]:
+        """Get time remaining until next alert can be sent for this stock."""
+        if asset_data.stock_cooldown is None:
+            return None
+        
+        time_since_last = current_time - asset_data.stock_cooldown.last_alert_time
+        
+        if time_since_last >= self.cooldown_duration:
+            return None
+        
+        return self.cooldown_duration - time_since_last
+    
     def get_cooldown_status(self, asset_data: AssetData, current_time: datetime) -> Dict[str, Any]:
         """Get detailed cooldown status for this stock."""
         if asset_data.stock_cooldown is None:
@@ -503,39 +474,11 @@ class AlertCooldownManager:
             "levels_touched_during_cooldown": levels_touched
         }
     
-    def get_total_touches(self, asset_data: AssetData) -> int:
-        """Get total touches for this stock today."""
-        if asset_data.stock_cooldown is None:
-            return 0
-        
-        pending_touches = sum(asset_data.stock_cooldown.levels_touched_during_cooldown.values())
-        return asset_data.stock_cooldown.total_touches + pending_touches
-    
-    def get_pending_touches_summary(self, asset_data: AssetData) -> Tuple[int, List[str]]:
-        """Get summary of pending touches during cooldown."""
-        if asset_data.stock_cooldown is None:
-            return 0, []
-        
-        total_pending = sum(asset_data.stock_cooldown.levels_touched_during_cooldown.values())
-        levels_touched = list(asset_data.stock_cooldown.levels_touched_during_cooldown.keys())
-        
-        return total_pending, levels_touched
-    
-    def get_time_until_next_alert(self, asset_data: AssetData, current_time: datetime) -> Optional[timedelta]:
-        """Get time remaining until next alert can be sent for this stock."""
-        if asset_data.stock_cooldown is None:
-            return None
-        
-        time_since_last = current_time - asset_data.stock_cooldown.last_alert_time
-        
-        if time_since_last >= self.cooldown_duration:
-            return None
-        
-        return self.cooldown_duration - time_since_last
-    
     def reset_daily_cooldowns(self, asset_data: AssetData):
         """Reset cooldown for a new trading day."""
         asset_data.stock_cooldown = None
+
+# --- Enhanced Service Classes ---
 
 class DatabaseService:
     """Handles database operations for storing alerts and historical data."""
@@ -618,11 +561,11 @@ class TelegramService:
         self.chat_id = config.get('chat_id')
         self.base_url = f"https://api.telegram.org/bot{self.bot_token}/sendMessage"
         self.last_message_time = 0
-        self.min_interval = 5
+        self.min_interval = 5  # Minimum seconds between messages (increased from 1)
         self.burst_count = 0
         self.burst_window_start = 0
-        self.max_burst_messages = 3
-        self.burst_window_seconds = 60
+        self.max_burst_messages = 3  # Max 3 messages per burst window
+        self.burst_window_seconds = 60  # 1 minute burst window
         
         if not self.bot_token or not self.chat_id:
             raise ValueError("Telegram bot_token or chat_id is missing in config.")
@@ -631,7 +574,9 @@ class TelegramService:
         """Sends a message with retry logic and enhanced rate limiting."""
         current_time = time.time()
         
+        # Check burst protection
         if current_time - self.burst_window_start > self.burst_window_seconds:
+            # Reset burst window
             self.burst_window_start = current_time
             self.burst_count = 0
         
@@ -639,54 +584,33 @@ class TelegramService:
             logger.warning(f"Telegram rate limit: {self.burst_count} messages sent in {self.burst_window_seconds}s window")
             return False
         
+        # Basic rate limiting
         time_since_last = current_time - self.last_message_time
         if time_since_last < self.min_interval:
             time.sleep(self.min_interval - time_since_last)
         
-        # Try with Markdown first, then fallback to plain text
+        payload = {
+            'chat_id': self.chat_id,
+            'text': message[:4096],  # Telegram message limit
+            'parse_mode': 'Markdown'
+        }
+        
         for attempt in range(max_retries):
             try:
-                # First attempt with Markdown
-                if attempt == 0:
-                    payload = {
-                        'chat_id': self.chat_id,
-                        'text': message[:4096],
-                        'parse_mode': 'Markdown'
-                    }
-                else:
-                    # Fallback: Remove markdown formatting and send as plain text
-                    clean_message = self._clean_markdown(message)
-                    payload = {
-                        'chat_id': self.chat_id,
-                        'text': clean_message[:4096]
-                        # No parse_mode for plain text
-                    }
-                
                 response = requests.post(self.base_url, data=payload, timeout=10)
                 response.raise_for_status()
                 self.last_message_time = time.time()
                 self.burst_count += 1
-                parse_mode = "Markdown" if attempt == 0 else "Plain Text"
-                logger.info(f"Alert sent successfully (attempt {attempt + 1}, {parse_mode})")
+                logger.info(f"Alert sent successfully (attempt {attempt + 1})")
                 return True
                 
             except requests.exceptions.RequestException as e:
                 logger.warning(f"Failed to send alert (attempt {attempt + 1}): {e}")
                 if attempt < max_retries - 1:
-                    time.sleep(2 ** attempt)
+                    time.sleep(2 ** attempt)  # Exponential backoff
         
         logger.error(f"Failed to send alert after {max_retries} attempts")
         return False
-    
-    def _clean_markdown(self, text: str) -> str:
-        """Remove markdown formatting for fallback plain text sending."""
-        import re
-        # Remove markdown formatting
-        text = re.sub(r'\*\*(.*?)\*\*', r'\1', text)  # **bold** -> bold
-        text = re.sub(r'\*(.*?)\*', r'\1', text)      # *italic* -> italic
-        text = re.sub(r'`(.*?)`', r'\1', text)        # `code` -> code
-        text = re.sub(r'_([^_]+)_', r'\1', text)      # _underline_ -> underline
-        return text
 
     def send_formatted_alert(self, asset_name: str, level_type: LevelType, 
                            level_value: float, candle: CandleData, 
@@ -728,7 +652,7 @@ class TelegramService:
             message += f"\n\n🎯 *Key Level Alert* - Major support/resistance"
         
         # Add cooldown info
-        message += f"\n⏰ *Next alert for {asset_name}:* 30 minutes"
+        message += f"\n⏰ *Next alert for {asset_name}:* 15 minutes"
         
         return self.send_alert(message)
 
@@ -764,48 +688,6 @@ class FyersService:
         except Exception as e:
             logger.error(f"Failed to initialize Fyers client: {e}")
             raise ValueError(f"Could not initialize Fyers client. Error: {e}")
-    
-    def _check_api_rate_limit(self) -> bool:
-        """Check if API rate limit allows another call with different limits for init vs monitoring."""
-        current_time = time.time()
-        
-        # Reset API call counter every minute
-        if current_time - self.api_window_start > 60:
-            self.api_window_start = current_time
-            self.api_call_count = 0
-        
-        # Use different limits for initialization vs monitoring
-        if self.initialization_mode:
-            # Aggressive during initialization to get all data quickly
-            max_calls = self.max_api_calls_per_minute  # Use full 180 calls/min
-            min_interval = 0.1  # 100ms during init (10 calls/sec)
-        else:
-            # Still generous during monitoring but with some buffer
-            max_calls = 150  # 150 calls per minute during monitoring (75% of limit)
-            min_interval = self.api_call_interval  # 100ms during monitoring
-        
-        # Check if we've exceeded the rate limit
-        if self.api_call_count >= max_calls:
-            logger.debug(f"API rate limit reached: {self.api_call_count}/{max_calls} calls in current minute")
-            return False
-        
-        # Check minimum interval between calls
-        time_since_last = current_time - self.last_api_call
-        if time_since_last < min_interval:
-            sleep_time = min_interval - time_since_last
-            time.sleep(sleep_time)
-        
-        self.last_api_call = time.time()
-        self.api_call_count += 1
-        return True
-    
-    def set_monitoring_mode(self):
-        """Switch to monitoring mode with stricter rate limits."""
-        self.initialization_mode = False
-        # Reset counters when switching modes
-        self.api_call_count = 0
-        self.api_window_start = time.time()
-        logger.info("🔄 Switched to monitoring mode with optimized API rate limits (150 calls/min)")
     
     def get_historical_ohlc(self, symbol: str, target_date: date) -> Optional[OHLCData]:
         """Enhanced method to get historical OHLC data with multiple fallback strategies."""
@@ -891,6 +773,48 @@ class FyersService:
             logger.debug(f"Different resolution strategy failed: {e}")
             return None
     
+    def _check_api_rate_limit(self) -> bool:
+        """Check if API rate limit allows another call with different limits for init vs monitoring."""
+        current_time = time.time()
+        
+        # Reset API call counter every minute
+        if current_time - self.api_window_start > 60:
+            self.api_window_start = current_time
+            self.api_call_count = 0
+        
+        # Use different limits for initialization vs monitoring
+        if self.initialization_mode:
+            # Aggressive during initialization to get all data quickly
+            max_calls = self.max_api_calls_per_minute  # Use full 180 calls/min
+            min_interval = 0.1  # 100ms during init (10 calls/sec)
+        else:
+            # Still generous during monitoring but with some buffer
+            max_calls = 150  # 150 calls per minute during monitoring (75% of limit)
+            min_interval = self.api_call_interval  # 100ms during monitoring
+        
+        # Check if we've exceeded the rate limit
+        if self.api_call_count >= max_calls:
+            logger.debug(f"API rate limit reached: {self.api_call_count}/{max_calls} calls in current minute")
+            return False
+        
+        # Check minimum interval between calls
+        time_since_last = current_time - self.last_api_call
+        if time_since_last < min_interval:
+            sleep_time = min_interval - time_since_last
+            time.sleep(sleep_time)
+        
+        self.last_api_call = time.time()
+        self.api_call_count += 1
+        return True
+    
+    def set_monitoring_mode(self):
+        """Switch to monitoring mode with stricter rate limits."""
+        self.initialization_mode = False
+        # Reset counters when switching modes
+        self.api_call_count = 0
+        self.api_window_start = time.time()
+        logger.info("🔄 Switched to monitoring mode with optimized API rate limits (150 calls/min)")
+    
     def _try_quotes_fallback(self, symbol: str, target_date: date) -> Optional[OHLCData]:
         """Fallback to quotes data with estimation."""
         try:
@@ -926,6 +850,7 @@ class FyersService:
         if not candles:
             return None
         
+        # Find the candle for target date or closest if allowed
         best_candle = None
         best_date = None
         
@@ -1061,51 +986,101 @@ class FyersService:
         logger.warning(f"All fallback resolutions failed for {symbol}")
         return None
 
-class MarketHoursChecker:
-    """Checks if market is open based on Indian market hours."""
+# --- Token Management Integration ---
+
+class BotRestartManager:
+    """Manages seamless bot restart with new tokens"""
     
-    def __init__(self, market_hours: Dict[str, str]):
-        self.market_start = datetime.strptime(market_hours.get('start', '09:15'), '%H:%M').time()
-        self.market_end = datetime.strptime(market_hours.get('end', '15:30'), '%H:%M').time()
-        self.pre_market_start = datetime.strptime(market_hours.get('pre_market_start', '09:00'), '%H:%M').time()
-        self.post_market_end = datetime.strptime(market_hours.get('post_market_end', '15:45'), '%H:%M').time()
-    
-    def is_market_open(self) -> bool:
-        """Check if market is currently open."""
-        now = datetime.now()
+    def __init__(self, bot_instance):
+        self.bot = bot_instance
+        self.restart_requested = False
+        self.new_token = None
         
-        # Check if it's a weekend
-        if now.weekday() >= 5:  # Saturday=5, Sunday=6
-            return False
+    def request_restart(self, new_token: str):
+        """Request bot restart with new token"""
+        logger.info(f"🔄 Bot restart requested with new token")
+        self.new_token = new_token
+        self.restart_requested = True
         
-        current_time = now.time()
+        # Stop current monitoring gracefully
+        self.bot.stop_monitoring()
         
-        # Check if within market hours
-        return self.market_start <= current_time <= self.market_end
-    
-    def get_market_status(self) -> MarketStatus:
-        """Get current market status."""
-        now = datetime.now()
+        # Wait for monitoring to stop
+        time.sleep(3)
         
-        if now.weekday() >= 5:
-            return MarketStatus.CLOSED
+        # Update config with new token
+        self.bot.config['fyers']['access_token'] = new_token
         
-        current_time = now.time()
+        # Reinitialize services
+        self.bot.fyers_service = FyersService(self.bot.config['fyers'])
         
-        if self.market_start <= current_time <= self.market_end:
-            return MarketStatus.OPEN
-        elif self.pre_market_start <= current_time < self.market_start:
-            return MarketStatus.PRE_MARKET
-        elif self.market_end < current_time <= self.post_market_end:
-            return MarketStatus.POST_MARKET
-        else:
-            return MarketStatus.CLOSED
+        # Send restart notification
+        self.bot.telegram_service.send_alert(
+            f"🔄 **Bot Restarted at {datetime.now().strftime('%H:%M:%S')}**\n"
+            f"✅ New token applied successfully\n"
+            f"🚀 Resuming monitoring with fresh authentication"
+        )
+        
+        # Restart monitoring
+        self.bot.start_monitoring()
+        
+        logger.info("✅ Bot restart completed successfully")
+        self.restart_requested = False
+
+# --- Main Application Class ---
 
 class CPRAlertBot:
     """Main application class orchestrating the CPR alert system with enhanced cooldown management."""
     
     def __init__(self):
         self.config = ConfigManager.load_config()
+        self.restart_manager = BotRestartManager(self)
+        self.token_manager = None
+        
+        # Print all loaded configurations
+        print("\n" + "="*60)
+        print("📋 LOADED CONFIGURATION")
+        print("="*60)
+        
+        print("\n🔑 FYERS CONFIG:")
+        fyers_config = self.config['fyers']
+        print(f"  App ID: {fyers_config.get('app_id', 'NOT SET')}")
+        print(f"  Access Token: {'SET' if fyers_config.get('access_token') else 'NOT SET'}")
+        
+        print("\n📱 TELEGRAM CONFIG:")
+        telegram_config = self.config['telegram']
+        print(f"  Bot Token: {'SET' if telegram_config.get('bot_token') else 'NOT SET'}")
+        print(f"  Chat ID: {telegram_config.get('chat_id', 'NOT SET')}")
+        
+        print(f"\n📊 ASSETS ({len(self.config['assets'])} configured):")
+        for i, asset in enumerate(self.config['assets'][:5], 1):  # Show first 5
+            print(f"  {i}. {asset['name']} ({asset['symbol']})")
+        if len(self.config['assets']) > 5:
+            print(f"  ... and {len(self.config['assets']) - 5} more")
+        
+        print("\n⚙️ ALERT SETTINGS:")
+        alert_settings = self.config['alert_settings']
+        print(f"  Check Interval: {alert_settings.get('check_interval_seconds', 'DEFAULT')} seconds")
+        print(f"  Tolerance: {alert_settings.get('tolerance_percent', 'DEFAULT')}%")
+        print(f"  Cooldown: {alert_settings.get('cooldown_minutes', 'DEFAULT')} minutes")
+        print(f"  Market Hours: {alert_settings['market_hours']['start']} - {alert_settings['market_hours']['end']}")
+        
+        print("\n🔧 ADVANCED SETTINGS:")
+        advanced = self.config['advanced_settings']
+        print(f"  Volume Analysis: {advanced.get('enable_volume_analysis', 'DEFAULT')}")
+        print(f"  Min Volume: {advanced.get('min_volume_threshold', 'DEFAULT')}")
+        print(f"  Strength Filtering: {advanced.get('enable_strength_filtering', 'DEFAULT')}")
+        
+        print("\n🛡️ SPAM PREVENTION:")
+        spam = self.config['spam_prevention']
+        print(f"  Max Alerts/Hour: {spam.get('max_alerts_per_hour', 'DEFAULT')}")
+        print(f"  Volume Confirmation: {spam.get('require_volume_confirmation', 'DEFAULT')}")
+        print(f"  Crossing Tolerance: {spam.get('crossing_tolerance_percent', 'DEFAULT')}%")
+        
+        print("="*60)
+        print("✅ Configuration loaded successfully!")
+        print("="*60 + "\n")
+        
         self.db_service = DatabaseService()
         self.fyers_service = FyersService(self.config['fyers'])
         self.telegram_service = TelegramService(self.config['telegram'])
@@ -1130,7 +1105,7 @@ class CPRAlertBot:
         
         # Initialize data freshness settings with spam prevention
         self.preferred_resolution = self.config.get('alert_settings', {}).get('preferred_resolution', '1')  # Changed from 30s to 1m
-        self.check_interval = self.config.get('alert_settings', {}).get('check_interval_seconds', 60)  # Increased from 15s to 60s
+        self.check_interval = self.config.get('alert_settings', {}).get('check_interval_seconds', 30)  # Increased from 15s to 30s
         
         # Ensure check interval is appropriate for resolution
         if 's' in self.preferred_resolution:
@@ -1147,7 +1122,10 @@ class CPRAlertBot:
         # Schedule daily level calculation
         schedule.every().day.at("08:00").do(self._calculate_daily_levels)
         
-        logger.info(f"🕕 Alert cooldown period set to {self.cooldown_manager.cooldown_minutes} minutes PER STOCK")
+        # Initialize token management
+        self._setup_token_management()
+        
+        logger.info(f"🕐 Alert cooldown period set to {self.cooldown_manager.cooldown_minutes} minutes PER STOCK")
         logger.info(f"⚡ Using {self.preferred_resolution} resolution for detection (spam-optimized)")
         logger.info(f"🔄 Check interval: {self.check_interval} seconds (spam-prevention)")
         
@@ -1156,48 +1134,51 @@ class CPRAlertBot:
             logger.warning(f"⚠️ Check interval {self.check_interval}s may cause spam alerts. Recommended: 30s+")
         if 's' in self.preferred_resolution and int(self.preferred_resolution.replace('s', '')) < 60:
             logger.warning(f"⚠️ Resolution {self.preferred_resolution} may cause spam alerts. Recommended: 1m+")
-        
-        # Send startup notification
-        self._send_startup_alert()
     
-    def _send_startup_alert(self):
-        """Send startup notification to Telegram."""
+    def _setup_token_management(self):
+        """Setup automated token management"""
         try:
-            startup_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-            num_assets = len(self.config.get('assets', []))
+            # Import here to avoid circular imports
+            from generate_official_token import AutoTokenManager
             
-            # Determine if using custom or default stock list
-            stocks_config = os.getenv("STOCKS_CONFIG", "")
-            stock_source = "custom configuration" if stocks_config else "default list"
+            self.token_manager = AutoTokenManager()
             
-            message = f"🚀 **CPR Alert Bot Started**\n\n"
-            message += f"📅 **Startup Time:** `{startup_time}`\n"
-            message += f"📊 **Assets Monitored:** {num_assets} stocks\n"
-            message += f"📋 **Stock Source:** {stock_source}\n"
-            message += f"⚡ **Resolution:** {self.preferred_resolution}\n"
-            message += f"🔄 **Check Interval:** {self.check_interval}s\n"
-            message += f"🕕 **Cooldown Period:** {self.cooldown_manager.cooldown_minutes}min\n"
-            message += f"🎯 **Tolerance:** {self.touch_detector.tolerance_percent}%\n\n"
+            # Setup restart callback
+            if not self.config.get('automation'):
+                self.config['automation'] = {}
             
-            # Add first few stocks being monitored
-            if num_assets > 0:
-                message += f"**Sample Assets:**\n"
-                sample_assets = self.config.get('assets', [])[:5]  # First 5 stocks
-                for asset in sample_assets:
-                    message += f"• {asset['name']} ({asset['symbol']})\n"
-                if num_assets > 5:
-                    message += f"• ... and {num_assets - 5} more\n"
+            # Set restart callback to trigger bot restart
+            self.config['automation']['restart_callback'] = """
+# This callback is executed when token is refreshed
+if 'bot_instance' in globals():
+    bot_instance.restart_manager.request_restart(new_token)
+"""
             
-            message += f"\n✅ **Bot is ready for monitoring!**"
+            # Schedule token refresh at 9pm
+            self.token_manager.schedule_token_refresh("21:00")
             
-            success = self.telegram_service.send_alert(message)
-            if success:
-                logger.info("📱 Startup alert sent to Telegram")
-            else:
-                logger.warning("⚠️ Failed to send startup alert to Telegram")
-                
+            logger.info("🔐 Token management setup complete - 9pm daily refresh scheduled")
+            
         except Exception as e:
-            logger.error(f"Error sending startup alert: {e}")
+            logger.error(f"⚠️ Token management setup failed: {e}")
+            logger.info("💡 Manual token refresh will be required")
+    
+    def check_token_expiry(self):
+        """Check if token is expired and needs refresh"""
+        if self.token_manager and self.token_manager.is_token_expired():
+            logger.warning("⚠️ Token expiring soon, attempting silent refresh...")
+            
+            new_token = self.token_manager.silent_token_refresh()
+            if new_token:
+                logger.info("✅ Token refreshed successfully")
+                self.restart_manager.request_restart(new_token)
+            else:
+                logger.error("❌ Token refresh failed - manual intervention required")
+                self.telegram_service.send_alert(
+                    "⚠️ **Token Refresh Required**\n"
+                    "Current token is expiring soon.\n"
+                    "Please run: `python generate_official_token.py`"
+                )
     
     def initialize_daily_levels(self) -> bool:
         """Initialize CPR levels for all configured assets."""
@@ -1283,10 +1264,17 @@ class CPRAlertBot:
         schedule_thread = Thread(target=self._run_schedule, daemon=True)
         schedule_thread.start()
         
+        # Token expiry check counter
+        token_check_counter = 0
+        
         while self.is_running:
             try:
                 current_time = datetime.now().time()
                 market_status = DateHelper.is_market_time(current_time, market_hours)
+                
+                # Check token expiry every 30 minutes
+                if token_check_counter % 90 == 0:  # Every 30 minutes (30 * 20s intervals)
+                    self.check_token_expiry()
                 
                 if market_status == MarketStatus.OPEN:
                     self._check_level_touches()
@@ -1297,6 +1285,7 @@ class CPRAlertBot:
                     continue
                 
                 time.sleep(self.check_interval)
+                token_check_counter += 1
                 
             except KeyboardInterrupt:
                 logger.info("Received interrupt signal, stopping...")
@@ -1455,6 +1444,19 @@ class CPRAlertBot:
             if i + batch_size < len(asset_items):
                 time.sleep(0.5)  # 500ms delay between batches (reduced from 2s)
     
+    def _reset_daily_data(self):
+        """Reset daily tracking data including stock-wide cooldowns."""
+        with self._lock:
+            for asset_data in self.asset_data.values():
+                asset_data.alerted_levels.clear()
+                asset_data.alerted_levels_timestamps.clear()
+                asset_data.recent_candles.clear()
+                asset_data.last_candle_timestamp = 0
+                # Reset stock-wide cooldown for new trading day
+                self.cooldown_manager.reset_daily_cooldowns(asset_data)
+            
+            logger.info("🔄 Daily data and stock-wide cooldowns reset completed")
+    
     def _cleanup_old_alerts(self, asset_data: AssetData, current_timestamp: int):
         """Clean up old alert IDs to prevent memory leak."""
         cleanup_threshold = current_timestamp - 3600  # Keep alerts for 1 hour
@@ -1471,23 +1473,9 @@ class CPRAlertBot:
         if alerts_to_remove:
             logger.debug(f"Cleaned up {len(alerts_to_remove)} old alert IDs for {asset_data.symbol}")
     
-    def _reset_daily_data(self):
-        """Reset daily tracking data including stock-wide cooldowns."""
-        with self._lock:
-            for asset_data in self.asset_data.values():
-                asset_data.alerted_levels.clear()
-                asset_data.alerted_levels_timestamps.clear()
-                asset_data.recent_candles.clear()
-                asset_data.last_candle_timestamp = 0
-                # Reset stock-wide cooldown for new trading day
-                self.cooldown_manager.reset_daily_cooldowns(asset_data)
-            
-            logger.info("🔄 Daily data and stock-wide cooldowns reset completed")
-    
     def stop_monitoring(self):
         """Stop the monitoring loop."""
         self.is_running = False
-        logger.info("🛑 Stopping monitoring...")
     
     def get_status_report(self) -> str:
         """Generate a detailed status report with stock-wide cooldown information."""
@@ -1567,14 +1555,29 @@ def create_sample_config():
                 "pre_market_start": "09:00",
                 "post_market_end": "15:45"
             },
-            "check_interval_seconds": 60,
-            "tolerance_percent": 0.15,
+            "check_interval_seconds": 20,
+            "tolerance_percent": 0.05,
             "cooldown_minutes": 30,
             "preferred_resolution": "1",
-            "focus_on_key_levels": True,
-            "min_volume_threshold": 0,
-            "enable_spam_prevention": True,
-            "strict_level_crossing": True
+            "focus_on_key_levels": true,
+            "min_volume_threshold": 5000,
+            "enable_spam_prevention": true,
+            "strict_level_crossing": true
+        },
+        "advanced_settings": {
+            "enable_volume_analysis": true,
+            "min_volume_threshold": 5000,
+            "enable_strength_filtering": true,
+            "min_touch_strength": 0.4,
+            "enable_trend_analysis": false,
+            "enable_volatility_filter": true
+        },
+        "spam_prevention": {
+            "min_candle_range_ratio": 0.3,
+            "max_alerts_per_hour": 6,
+            "require_volume_confirmation": true,
+            "strict_crossing_validation": true,
+            "crossing_tolerance_percent": 0.02
         }
     }
     
@@ -1665,24 +1668,40 @@ class CLIInterface:
 # --- Main Entry Points ---
 
 def main():
-    """Main entry point for the CPR alert bot."""
+    """Main entry point for the CPR alert bot with token management."""
     try:
-        # Check if config file exists
-        if CONFIG_FILE.exists():
-            logger.info("Using JSON config file")
-        else:
-            logger.info("Using environment variables (GitHub deployment mode)")
+        # Check required environment variables
+        required_vars = ['FYERS_APP_ID', 'FYERS_ACCESS_TOKEN', 'TELEGRAM_BOT_TOKEN', 'TELEGRAM_CHAT_ID']
+        missing_vars = [var for var in required_vars if not os.getenv(var)]
+        
+        if missing_vars:
+            print(f"Missing required environment variables: {', '.join(missing_vars)}")
+            print("Please set the environment variables and run again.")
+            return
         
         # Initialize bot
         bot = CPRAlertBot()
+        
+        # Make bot instance available globally for token refresh callbacks
+        globals()['bot_instance'] = bot
         
         # Initialize daily levels
         if not bot.initialize_daily_levels():
             logger.error("Failed to initialize daily levels. Exiting.")
             return
         
+        # Setup signal handlers for graceful shutdown
+        def signal_handler(signum, frame):
+            logger.info(f"Received signal {signum}, shutting down gracefully...")
+            bot.stop_monitoring()
+            sys.exit(0)
+        
+        signal.signal(signal.SIGINT, signal_handler)
+        signal.signal(signal.SIGTERM, signal_handler)
+        
         # Start monitoring
         try:
+            logger.info("🚀 Starting CPR Alert Bot with automated token management")
             bot.start_monitoring()
         except KeyboardInterrupt:
             logger.info("Received interrupt signal")
@@ -1696,9 +1715,13 @@ def main():
 def interactive_main():
     """Interactive main entry point."""
     try:
-        if not CONFIG_FILE.exists():
-            print("Config file not found. Creating sample...")
-            create_sample_config()
+        # Check required environment variables
+        required_vars = ['FYERS_APP_ID', 'FYERS_ACCESS_TOKEN', 'TELEGRAM_BOT_TOKEN', 'TELEGRAM_CHAT_ID']
+        missing_vars = [var for var in required_vars if not os.getenv(var)]
+        
+        if missing_vars:
+            print(f"Missing required environment variables: {', '.join(missing_vars)}")
+            print("Please set the environment variables and run again.")
             return
         
         bot = CPRAlertBot()
@@ -1724,30 +1747,11 @@ def test_connection():
         
         print("\nTesting Telegram connection...")
         telegram_service = TelegramService(config['telegram'])
-        
-        # Test simple message first
-        print("Testing simple message...")
-        success = telegram_service.send_alert("🧪 Simple test message")
+        success = telegram_service.send_alert("🧪 CPR Bot connection test")
         if success:
-            print("✅ Simple message successful")
+            print("✅ Telegram connection successful")
         else:
-            print("❌ Simple message failed")
-            
-        # Test formatted message
-        print("Testing formatted message...")
-        test_formatted_msg = """🚀 **CPR Alert Bot Test**
-
-📅 **Test Time:** `2025-07-03 18:55:00`
-📊 **Status:** Testing markdown formatting
-🎯 **Result:** If you see this, formatting works!
-
-✅ **Connection test completed**"""
-        
-        success = telegram_service.send_alert(test_formatted_msg)
-        if success:
-            print("✅ Formatted message successful")
-        else:
-            print("❌ Formatted message failed")
+            print("❌ Telegram connection failed")
             
     except Exception as e:
         print(f"❌ Connection test failed: {e}")
