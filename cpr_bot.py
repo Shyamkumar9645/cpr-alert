@@ -15,6 +15,16 @@ from pathlib import Path
 import sys
 import signal
 import subprocess
+import io
+try:
+    import mplfinance as mpf
+    import pandas as pd
+    from PIL import Image
+    import matplotlib.pyplot as plt
+    CHART_SUPPORT = True
+except ImportError as e:
+    logger.warning(f"Chart dependencies not installed: {e}. Charts will be disabled.")
+    CHART_SUPPORT = False
 
 # --- Enhanced Configuration ---
 DB_FILE = Path(__file__).parent / 'cpr_alerts.db'
@@ -103,6 +113,173 @@ class AssetData:
     stock_cooldown: Optional[StockCooldown] = None  # Single cooldown for entire stock
     alerted_levels_timestamps: Dict[str, int] = field(default_factory=dict)  # Track alert timestamps for cleanup
     recent_candles: List[CandleData] = field(default_factory=list)  # Track recent candles for better validation
+
+class ChartGenerator:
+    """Generates candlestick charts with CPR levels for alerts."""
+    
+    def __init__(self):
+        self.chart_enabled = CHART_SUPPORT
+        if not self.chart_enabled:
+            logger.warning("Chart generation disabled - missing dependencies")
+    
+    def create_cpr_chart(self, symbol: str, asset_name: str, candle_data: List[CandleData], 
+                        cpr_levels: CPRLevels, current_level: LevelType, 
+                        current_price: float) -> Optional[io.BytesIO]:
+        """Create 5-minute candlestick chart with CPR levels."""
+        
+        if not self.chart_enabled or not candle_data:
+            return None
+        
+        try:
+            # Prepare data for mplfinance
+            chart_data = []
+            for candle in candle_data:
+                chart_data.append({
+                    'datetime': candle.datetime,
+                    'open': candle.open,
+                    'high': candle.high,
+                    'low': candle.low,
+                    'close': candle.close,
+                    'volume': candle.volume
+                })
+            
+            df = pd.DataFrame(chart_data)
+            df.set_index('datetime', inplace=True)
+            df = df.rename(columns={'open': 'Open', 'high': 'High', 'low': 'Low', 'close': 'Close', 'volume': 'Volume'})
+            
+            # Create horizontal lines for CPR levels (exactly matching reference image)
+            hlines = dict(
+                hlines=[cpr_levels.s1, cpr_levels.pivot, cpr_levels.r1],  # Key levels
+                colors=['green', 'blue', 'red'],  # Green for S1, blue for pivot, red for R1
+                linestyle='--',  # Dashed lines (more visible than dotted)
+                linewidths=2,  # Thicker lines for visibility
+                alpha=0.8  # Semi-transparent
+            )
+            
+            # Create style matching reference image exactly
+            mc = mpf.make_marketcolors(
+                up='#26a69a', down='#ef5350',  # Standard trading colors
+                edge='inherit',
+                wick='inherit',
+                volume={'up': '#26a69a', 'down': '#ef5350'}  # Volume colors
+            )
+            
+            style = mpf.make_mpf_style(
+                marketcolors=mc,
+                gridstyle='-',        # Solid grid lines like reference
+                gridcolor='#e0e0e0',  # Light gray grid
+                facecolor='white',    # White background like reference
+                figcolor='white',     # White figure background
+                edgecolor='black',
+                y_on_right=True       # Price labels on right side
+            )
+            
+            # Create compact chart with no title to save space
+            fig, axes = mpf.plot(
+                df,
+                type='candle',
+                style=style,
+                title='',  # No title for compact design
+                volume=True,
+                hlines=hlines,
+                figsize=(10, 6),  # More compact size
+                tight_layout=False,  # Manual layout control
+                returnfig=True,
+                datetime_format='%H:%M',
+                xrotation=0
+            )
+            
+            # Clean styling like reference image - no heavy backgrounds
+            ax = axes[0]
+            
+            # Manually draw CPR level lines to ensure they're visible
+            ax.axhline(y=cpr_levels.s1, color='green', linestyle=':', linewidth=2, alpha=0.8)
+            ax.axhline(y=cpr_levels.pivot, color='blue', linestyle=':', linewidth=2, alpha=0.8)
+            ax.axhline(y=cpr_levels.r1, color='red', linestyle=':', linewidth=2, alpha=0.8)
+            
+            # Add compact title in top left corner
+            ax.text(0.02, 0.98, f'{asset_name} - CPR Levels', transform=ax.transAxes, 
+                   verticalalignment='top', horizontalalignment='left', 
+                   color='black', fontweight='bold', fontsize=10)
+            
+            # Add level info in top right corner
+            level_text = f'S1:{cpr_levels.s1:.0f} | P:{cpr_levels.pivot:.0f} | R1:{cpr_levels.r1:.0f}'
+            ax.text(0.98, 0.98, level_text, transform=ax.transAxes, 
+                   verticalalignment='top', horizontalalignment='right', 
+                   color='black', fontweight='bold', fontsize=9)
+            
+            # Current price alert in top right
+            ax.text(0.98, 0.93, f'{current_level.value} Alert: {current_price:.2f}', transform=ax.transAxes, 
+                   verticalalignment='top', horizontalalignment='right', 
+                   color='red', fontweight='bold', fontsize=9)
+            
+            # Compact layout - remove extra white space
+            fig.subplots_adjust(top=0.97, bottom=0.15, left=0.08, right=0.95, hspace=0.1)
+            
+            # Remove extra margins and make chart fill the space
+            if len(axes) > 1:  # Volume subplot
+                axes[1].margins(x=0)
+            
+            # Save to bytes buffer with minimal padding
+            buf = io.BytesIO()
+            fig.savefig(buf, format='png', dpi=300, bbox_inches='tight', pad_inches=0.1, facecolor='white')
+            buf.seek(0)
+            
+            # Clean up
+            plt.close(fig)
+            
+            logger.info(f"Chart generated successfully for {symbol}")
+            return buf
+            
+        except Exception as e:
+            logger.error(f"Error generating chart for {symbol}: {e}")
+            return None
+    
+    def get_chart_data(self, fyers_service, symbol: str, candle_count: int = 78) -> List[CandleData]:
+        """Get 5-minute candle data spanning today and yesterday for comprehensive chart."""
+        try:
+            end_time = datetime.now()
+            # Get data from yesterday to cover both days
+            start_time = end_time - timedelta(days=2)  # 2 days to ensure we get yesterday + today
+            
+            data = {
+                "symbol": symbol,
+                "resolution": "5",  # 5 minute candles
+                "date_format": "1",
+                "range_from": start_time.strftime('%Y-%m-%d'),
+                "range_to": end_time.strftime('%Y-%m-%d'),
+                "cont_flag": "1"
+            }
+            
+            response = fyers_service.client.history(data=data)
+            
+            if response.get('s') == 'ok' and response.get('candles'):
+                candles = response['candles']
+                chart_candles = []
+                
+                # Take last 'candle_count' candles
+                for candle in candles[-candle_count:]:
+                    timestamp, o, h, l, c, volume = candle
+                    candle_datetime = datetime.fromtimestamp(timestamp)
+                    
+                    chart_candles.append(CandleData(
+                        timestamp=timestamp,
+                        open=o,
+                        high=h,
+                        low=l,
+                        close=c,
+                        volume=volume,
+                        datetime=candle_datetime,
+                        time_str=candle_datetime.strftime('%H:%M')
+                    ))
+                
+                return chart_candles
+            
+            return []
+            
+        except Exception as e:
+            logger.error(f"Error fetching chart data for {symbol}: {e}")
+            return []
 
 # --- Helper Functions and Classes ---
 
@@ -569,6 +746,9 @@ class TelegramService:
         
         if not self.bot_token or not self.chat_id:
             raise ValueError("Telegram bot_token or chat_id is missing in config.")
+        
+        # URLs for different message types
+        self.photo_url = f"https://api.telegram.org/bot{self.bot_token}/sendPhoto"
 
     def send_alert(self, message: str, max_retries: int = 3) -> bool:
         """Sends a message with retry logic and enhanced rate limiting."""
@@ -611,11 +791,61 @@ class TelegramService:
         
         logger.error(f"Failed to send alert after {max_retries} attempts")
         return False
+    
+    def send_photo_with_caption(self, photo_buffer: io.BytesIO, caption: str, max_retries: int = 3) -> bool:
+        """Send a photo with caption to Telegram."""
+        current_time = time.time()
+        
+        # Check rate limiting
+        if current_time - self.burst_window_start > self.burst_window_seconds:
+            self.burst_window_start = current_time
+            self.burst_count = 0
+        
+        if self.burst_count >= self.max_burst_messages:
+            logger.warning(f"Telegram rate limit reached, skipping photo")
+            return False
+        
+        time_since_last = current_time - self.last_message_time
+        if time_since_last < self.min_interval:
+            time.sleep(self.min_interval - time_since_last)
+        
+        for attempt in range(max_retries):
+            try:
+                # Reset buffer position
+                photo_buffer.seek(0)
+                
+                files = {
+                    'photo': ('chart.png', photo_buffer, 'image/png')
+                }
+                
+                data = {
+                    'chat_id': self.chat_id,
+                    'caption': caption[:1024],  # Telegram caption limit
+                    'parse_mode': 'Markdown'
+                }
+                
+                response = requests.post(self.photo_url, files=files, data=data, timeout=30)
+                response.raise_for_status()
+                
+                self.last_message_time = time.time()
+                self.burst_count += 1
+                logger.info(f"Chart sent successfully (attempt {attempt + 1})")
+                return True
+                
+            except requests.exceptions.RequestException as e:
+                logger.warning(f"Failed to send chart (attempt {attempt + 1}): {e}")
+                if attempt < max_retries - 1:
+                    time.sleep(2 ** attempt)
+        
+        logger.error(f"Failed to send chart after {max_retries} attempts")
+        return False
 
     def send_formatted_alert(self, asset_name: str, level_type: LevelType, 
                            level_value: float, candle: CandleData, 
-                           total_touches: int = 1, pending_levels: List[str] = None) -> bool:
-        """Sends a formatted level touch alert with real-time detection info."""
+                           total_touches: int = 1, pending_levels: List[str] = None,
+                           chart_buffer: Optional[io.BytesIO] = None, 
+                           symbol: str = None) -> bool:
+        """Sends a formatted level touch alert with real-time detection info and optional chart."""
         emoji_map = {
             LevelType.S1: '📉',
             LevelType.R1: '🚨',
@@ -647,14 +877,18 @@ class TelegramService:
         message += f"📅 *Data Time:* `{candle.time_str}`\n"
         
         
-        # Add significance indicators
-        if level_type in [LevelType.S1, LevelType.R1]:
-            message += f"\n\n🎯 *Key Level Alert* - Major support/resistance"
+        # Skip significance indicators, cooldown info, and chart info
         
-        # Add cooldown info
-        message += f"\n⏰ *Next alert for {asset_name}:* 15 minutes"
-        
-        return self.send_alert(message)
+        # Send chart with caption if available, otherwise send text message
+        if chart_buffer:
+            success = self.send_photo_with_caption(chart_buffer, message)
+            if not success:
+                # Fallback to text message if chart fails
+                logger.warning(f"Chart failed for {asset_name}, sending text alert")
+                return self.send_alert(message)
+            return success
+        else:
+            return self.send_alert(message)
 
 class FyersService:
     """Enhanced Fyers service with better error handling and data validation."""
@@ -1084,6 +1318,7 @@ class CPRAlertBot:
         self.db_service = DatabaseService()
         self.fyers_service = FyersService(self.config['fyers'])
         self.telegram_service = TelegramService(self.config['telegram'])
+        self.chart_generator = ChartGenerator()
         # Initialize touch detector with less sensitive tolerance
         default_tolerance = 0.25  # Increased from 0.1% to 0.25% to reduce false positives
         configured_tolerance = self.config.get('alert_settings', {}).get('tolerance_percent', default_tolerance)
@@ -1124,6 +1359,12 @@ class CPRAlertBot:
         
         # Initialize token management
         self._setup_token_management()
+        
+        # Log chart support status
+        if self.chart_generator.chart_enabled:
+            logger.info("📊 Chart generation enabled - will send 5min charts with alerts")
+        else:
+            logger.warning("📊 Chart generation disabled - install: pip install mplfinance pandas pillow matplotlib")
         
         logger.info(f"🕐 Alert cooldown period set to {self.cooldown_manager.cooldown_minutes} minutes PER STOCK")
         logger.info(f"⚡ Using {self.preferred_resolution} resolution for detection (spam-optimized)")
@@ -1387,14 +1628,37 @@ if 'bot_instance' in globals():
                         # Get updated total touches
                         total_touches = self.cooldown_manager.get_total_touches(asset_data)
                         
-                        # Send alert with enhanced information
+                        # Generate chart if enabled
+                        chart_buffer = None
+                        if self.chart_generator.chart_enabled:
+                            try:
+                                # Get chart data (5-minute candles)
+                                chart_candles = self.chart_generator.get_chart_data(
+                                    self.fyers_service, symbol, candle_count=50
+                                )
+                                
+                                if chart_candles:
+                                    chart_buffer = self.chart_generator.create_cpr_chart(
+                                        symbol,
+                                        asset_data.name,
+                                        chart_candles,
+                                        asset_data.levels,
+                                        first_level_type,
+                                        candle.close
+                                    )
+                            except Exception as e:
+                                logger.error(f"Chart generation failed for {asset_data.name}: {e}")
+                        
+                        # Send alert with enhanced information (including chart)
                         success = self.telegram_service.send_formatted_alert(
                             asset_data.name,
                             first_level_type,
                             first_level_value,
                             candle,
                             total_touches,
-                            pending_levels
+                            pending_levels,
+                            chart_buffer,
+                            symbol
                         )
                         
                         if success:
