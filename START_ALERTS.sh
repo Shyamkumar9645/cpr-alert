@@ -1,18 +1,21 @@
 #!/bin/bash
 
-# ==================================================
-# CPR STOCK ALERT SYSTEM - ONE CLICK START
-# ==================================================
-# Just run this script to start receiving stock alerts!
+echo "--- Starting CPR Stock Alert System ---"
 
-clear
-echo "🚀 Starting CPR Stock Alert System..."
-echo "===================================="
+# Activate virtual environment if you have one
+# source /path/to/your/venv/bin/activate
 
-# Make sure we're in the right directory
-cd "$(dirname "$0")"
+# Check if dependencies are installed
+if ! python -c "import pkg_resources; pkg_resources.require(open('requirements.txt', 'r'))" &> /dev/null; then
+    echo "Dependencies not met. Installing from requirements.txt..."
+    pip install -r requirements.txt
+    if [ $? -ne 0 ]; then
+        echo "Error installing dependencies. Exiting."
+        exit 1
+    fi
+fi
 
-# Run the one-click launcher
-python3 one_click_start.py
+# Run the main application
+python main.py
 
-echo "👋 CPR Alert System stopped."
+echo "--- CPR Stock Alert System has stopped ---"
