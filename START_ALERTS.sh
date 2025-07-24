@@ -1,21 +1,11 @@
 #!/bin/bash
 
-echo "--- Starting CPR Stock Alert System ---"
+# Change to the script's directory to ensure all paths are correct
+cd "$(dirname "$0")"
 
-# Activate virtual environment if you have one
-# source /path/to/your/venv/bin/activate
+echo "🚀 Starting CPR Alert Bot from: $(pwd)"
 
-# Check if dependencies are installed
-if ! python -c "import pkg_resources; pkg_resources.require(open('requirements.txt', 'r'))" &> /dev/null; then
-    echo "Dependencies not met. Installing from requirements.txt..."
-    pip install -r requirements.txt
-    if [ $? -ne 0 ]; then
-        echo "Error installing dependencies. Exiting."
-        exit 1
-    fi
-fi
+# Execute the main Python script
+python3 main.py
 
-# Run the main application
-python main.py
-
-echo "--- CPR Stock Alert System has stopped ---"
+echo "✅ Bot process has been started."
