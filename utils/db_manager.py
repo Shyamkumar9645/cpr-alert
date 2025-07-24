@@ -1,6 +1,8 @@
 import sqlite3
 import logging
+from typing import Optional
 from datetime import datetime
+
 
 class DatabaseManager:
     """

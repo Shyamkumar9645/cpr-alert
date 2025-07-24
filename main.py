@@ -62,11 +62,13 @@ class AlertingSystem:
             prev_trading_day = self._get_previous_trading_day(today)
 
             for symbol in self.config['alert_settings']['symbols']:
-                self.logger.info(f"Fetching previous day's data for {symbol}...")
+                name = symbol.replace("NSE:", "").replace("-INDEX", "").replace("-EQ", "")
+
+                self.logger.info(f"Fetching previous day's data for {name} ({symbol})...")
                 hist_data = self.fyers.get_historical_data(symbol, "D", prev_trading_day, prev_trading_day)
 
                 if not hist_data:
-                    self.logger.warning(f"Could not fetch historical data for {symbol}. Skipping.")
+                    self.logger.warning(f"Could not fetch historical data for {name} ({symbol}). Skipping.")
                     continue
 
                 # The API returns data for the 'from' date, which is the previous trading day
@@ -74,8 +76,8 @@ class AlertingSystem:
                 ohlc = OHLCData(open=prev_day_candle[1], high=prev_day_candle[2], low=prev_day_candle[3], close=prev_day_candle[4])
                 cpr = self.calculate_cpr(ohlc)
 
-                self.assets_data[symbol] = AssetData(symbol=symbol, previous_day_ohlc=ohlc, cpr_levels=cpr)
-                self.logger.info(f"Initialized {symbol} with CPR (TC: {cpr.tc:.2f}, P: {cpr.pivot:.2f}, BC: {cpr.bc:.2f})")
+                self.assets_data[symbol] = AssetData(symbol=symbol, name=name, previous_day_ohlc=ohlc, cpr_levels=cpr)
+                self.logger.info(f"Initialized {name} ({symbol}) with CPR (TC: {cpr.tc:.2f}, P: {cpr.pivot:.2f}, BC: {cpr.bc:.2f})")
 
         self.notifier.send_message("✅ Assets initialized for the day!")
 
@@ -120,7 +122,7 @@ class AlertingSystem:
         if candle_data_raw:
             candles = [CandleData(timestamp=c[0], open=c[1], high=c[2], low=c[3], close=c[4]).__dict__ for c in candle_data_raw]
             chart_file = self.charting.create_cpr_chart(
-                symbol, candles, self.assets_data[symbol].cpr_levels.__dict__, ltp
+                symbol, self.assets_data[symbol].name, candles, self.assets_data[symbol].cpr_levels.__dict__, level_type.value, ltp
             )
             self.notifier.send_message(message, photo_path=chart_file)
         else:

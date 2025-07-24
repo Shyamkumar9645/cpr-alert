@@ -564,7 +564,7 @@ class OneClickLauncher:
         
         try:
             # Import here to avoid circular imports
-            from cpr_bot import CPRAlertBot
+            from cpr_bot1 import CPRAlertBot
             
             # Create bot instance
             bot = CPRAlertBot()

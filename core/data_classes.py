@@ -56,6 +56,7 @@ class StockCooldown:
 @dataclass
 class AssetData:
     symbol: str
+    name: str
     previous_day_ohlc: Optional[OHLCData] = None
     cpr_levels: Optional[CPRLevels] = None
     day_high: float = 0.0

@@ -2,7 +2,8 @@ fyers-apiv3==3.1.7
 requests==2.31.0
 schedule==1.2.0
 mplfinance==0.12.9b7
-pandas==2.1.4
-pillow==10.1.0
-matplotlib==3.8.2
-
+pandas
+pillow
+matplotlib
+python-dotenv
+pytz

@@ -11,7 +11,7 @@ def generate_fyers_token():
     print("--- Fyers Access Token Generation ---")
 
     # Load credentials from .env file
-    env_path = Path(__file__).parent.parent / '.env'
+    env_path = Path(__file__).parent / '.env'
     if not env_path.exists():
         print("Error: .env file not found. Please run setup_security.py first.")
         return
