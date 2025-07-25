@@ -1,8 +1,9 @@
 import logging
 import os
 from datetime import date, timedelta
-from typing import Optional, List
+from typing import Optional, List, Callable
 from fyers_apiv3 import fyersModel
+from fyers_apiv3.FyersWebsocket.data_ws import FyersDataSocket
 
 from core.data_classes import OHLCData, CandleData
 from utils.config_manager import ConfigManager
@@ -13,24 +14,59 @@ class FyersService:
         self.client_id = config.get('app_id')
         self.secret_key = config.get('secret_key')
         self.redirect_uri = config.get('redirect_uri')
-        self.access_token = config.get('access_token') # Get token from config
+        self.access_token = config.get('access_token')
         self.log_path = config.get('log_path', './logs')
         self.fyers = self._create_client()
+        self.websocket = None
         self.logger = logging.getLogger(__name__)
 
     def _create_client(self) -> fyersModel.FyersModel:
-        # The client is now created directly with the access token
         return fyersModel.FyersModel(
             client_id=self.client_id,
             token=self.access_token,
             log_path=self.log_path
         )
 
+    def start_websocket(self, symbols: List[str], on_message_callback: Callable):
+        """Initializes and connects to the Fyers Data WebSocket."""
+        if not self.access_token:
+            self.logger.error("Cannot start WebSocket without an access token.")
+            return
+
+        ws_access_token = f"{self.client_id}:{self.access_token}"
+        data_type = "SymbolUpdate"
+
+        def on_message(message):
+            if isinstance(message, list) and len(message) > 0 and "ltp" in message[0]:
+                on_message_callback(message[0])
+
+        def on_error(message):
+            self.logger.error(f"WebSocket Error: {message}")
+
+        def on_close(message):
+            self.logger.warning(f"WebSocket Connection Closed: {message}")
+
+        def on_open():
+            self.logger.info("WebSocket connection established. Subscribing to symbols...")
+            # --- THE FIX: Changed 'symbol=' to 'symbols=' ---
+            self.websocket.subscribe(symbols=symbols, data_type=data_type)
+            # --- END OF FIX ---
+            self.websocket.keep_running()
+
+        self.websocket = FyersDataSocket(
+            access_token=ws_access_token,
+            log_path=self.log_path,
+            on_connect=on_open,
+            on_close=on_close,
+            on_error=on_error,
+            on_message=on_message
+        )
+
+        self.websocket.connect()
+
+    # ... (the rest of the file remains the same)
+
     def generate_access_token(self) -> Optional[str]:
-        """
-        Guides the user to generate a new access token and returns it.
-        It no longer writes to a file.
-        """
         session = fyersModel.SessionModel(
             client_id=self.client_id,
             secret_key=self.secret_key,
@@ -55,8 +91,6 @@ class FyersService:
         else:
             self.logger.error(f"Token generation failed: {response.get('message', 'Unknown error')}")
             return None
-
-    # --- All other functions (get_ohlc_from_intraday, etc.) remain the same ---
 
     def get_ohlc_from_intraday(self, symbol: str, target_date: date) -> Optional[OHLCData]:
         data = {
@@ -84,24 +118,6 @@ class FyersService:
                 return None
         except Exception as e:
             self.logger.error(f"Exception while fetching intraday for {symbol}: {e}", exc_info=True)
-            return None
-
-    def get_latest_candle(self, symbol: str) -> Optional[CandleData]:
-        end_date = date.today()
-        start_date = end_date - timedelta(days=2)
-        data = {
-            "symbol": symbol, "resolution": "5", "date_format": "1",
-            "range_from": start_date.strftime('%Y-%m-%d'),
-            "range_to": end_date.strftime('%Y-%m-%d'),
-            "cont_flag": "1"
-        }
-        try:
-            response = self.fyers.history(data=data)
-            if response.get('code') == 200 and response.get('candles'):
-                latest = response['candles'][-1]
-                return CandleData(timestamp=latest[0], open=latest[1], high=latest[2], low=latest[3], close=latest[4], volume=latest[5])
-        except Exception as e:
-            self.logger.error(f"Error fetching latest candle for {symbol}: {e}")
             return None
 
     def get_historical_data_for_chart(self, symbol: str) -> Optional[List[CandleData]]:

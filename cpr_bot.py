@@ -3,7 +3,7 @@ import os
 import logging
 import time
 from datetime import datetime, date
-from typing import Dict
+from typing import Dict, List
 from threading import Lock
 import schedule
 
@@ -12,7 +12,6 @@ project_root = os.path.dirname(os.path.abspath(__file__))
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
-# These imports will now succeed.
 from core.data_classes import MarketStatus, LevelType, CandleData, AssetData
 from utils.chart_generator import ChartGenerator
 from services.fyers_service import FyersService
@@ -33,10 +32,8 @@ class CPRAlertBot:
         self.telegram_service = TelegramService(self.config['telegram_credentials'])
         self.chart_generator = ChartGenerator()
 
-        # Safely get settings from your config
         alert_settings = self.config.get('alert_settings', {})
         self.cooldown_manager = AlertCooldownManager(alert_settings.get('cooldown_minutes', 15))
-        self.check_interval = alert_settings.get('check_interval_seconds', 60)
         self.tolerance_percent = alert_settings.get('tolerance_percent', 0.1)
 
         self.asset_data: Dict[str, AssetData] = {}
@@ -78,56 +75,78 @@ class CPRAlertBot:
 
     def _send_daily_summary(self, calculation_date: date):
         summary_msg = f"🎯 *Daily CPR Levels Initialized*\n"
-        summary_msg += f"_Based on {calculation_date.strftime('%d/%m/%Y')} data for {len(self.asset_data)} assets._"
+        summary_msg += f"_Based on {calculation_date.strftime('%Y-%m-%d')} data for {len(self.asset_data)} assets._"
         self.telegram_service.send_alert(summary_msg)
 
     def start_monitoring(self):
+        """
+        Starts the monitoring process by connecting to the WebSocket.
+        The bot is now event-driven and will react to messages.
+        """
         if not self.asset_data:
             self.logger.error("No asset data available. Run initialize_daily_levels() first.")
             return
 
         self.is_running = True
-        self.logger.info(f"✅ Monitoring started for {len(self.asset_data)} assets.")
-        schedule.every().day.at("08:00").do(self.initialize_daily_levels)
+        self.logger.info(f"✅ Starting WebSocket monitoring for {len(self.asset_data)} assets.")
 
+        # Get the list of symbols to subscribe to
+        symbols_to_monitor = list(self.asset_data.keys())
+
+        # Start the websocket and pass our data handling function as the callback
+        self.fyers_service.start_websocket(
+            symbols=symbols_to_monitor,
+            on_message_callback=self.on_live_data
+        )
+
+        # The bot will now run indefinitely, driven by WebSocket events.
+        # We can add a simple loop here to keep the main thread alive.
         while self.is_running:
+            time.sleep(1)
+
+    def on_live_data(self, message: Dict):
+        """
+        This method is called by the FyersService every time a new price tick arrives.
+        """
+        try:
             market_status = DateHelper.get_market_status()
-            if market_status == MarketStatus.OPEN:
-                self._check_level_touches()
-            else:
-                self.logger.info("Market is closed. Sleeping for 10 minutes.")
-                time.sleep(600)
+            if market_status != MarketStatus.OPEN:
+                return # Ignore messages outside of market hours
 
-            schedule.run_pending()
-            time.sleep(self.check_interval)
+            symbol = message["symbol"]
+            ltp = message["ltp"]
 
-    def _check_level_touches(self):
-        for symbol, asset_data in self.asset_data.items():
-            try:
-                candle = self.fyers_service.get_latest_candle(symbol)
-                if not candle or (asset_data.last_candle_timestamp and candle.timestamp <= asset_data.last_candle_timestamp):
-                    continue
+            # Since we get live ticks (LTP), we treat open, high, low, and close as the same value.
+            # We create a pseudo-candle for our existing logic to work.
+            tick_as_candle = CandleData(
+                timestamp=int(time.time()),
+                open=ltp, high=ltp, low=ltp, close=ltp, volume=message.get("v", 0)
+            )
 
-                with self._lock:
-                    asset_data.last_candle_timestamp = candle.timestamp
+            asset_data = self.asset_data.get(symbol)
+            if not asset_data:
+                return
 
-                key_levels = {
-                    LevelType.R1: asset_data.levels.r1,
-                    LevelType.PIVOT: asset_data.levels.pivot,
-                    LevelType.S1: asset_data.levels.s1,
-                }
+            key_levels = {
+                LevelType.R1: asset_data.levels.r1,
+                LevelType.PIVOT: asset_data.levels.pivot,
+                LevelType.S1: asset_data.levels.s1,
+            }
 
-                for level_type, level_value in key_levels.items():
-                    if self._is_level_touched(candle, level_value) and self.cooldown_manager.can_send_alert(symbol):
-                        self._trigger_alert(asset_data, level_type, level_value, candle)
-                        self.cooldown_manager.record_alert_sent(symbol)
-                        break
-            except Exception as e:
-                self.logger.error(f"Error checking levels for {symbol}: {e}", exc_info=True)
+            for level_type, level_value in key_levels.items():
+                if self._is_level_touched(tick_as_candle, level_value) and self.cooldown_manager.can_send_alert(symbol):
+                    self._trigger_alert(asset_data, level_type, level_value, tick_as_candle)
+                    self.cooldown_manager.record_alert_sent(symbol)
+                    break
+        except Exception as e:
+            self.logger.error(f"Error processing live data for {message.get('symbol')}: {e}", exc_info=True)
+
 
     def _is_level_touched(self, candle: CandleData, level_value: float) -> bool:
+        # For a live tick, high and low are the same (the LTP).
+        # We check if the level is within the tolerance of the current price.
         tolerance = level_value * (self.tolerance_percent / 100)
-        return (candle.low - tolerance) <= level_value <= (candle.high + tolerance)
+        return (level_value - tolerance) <= candle.close <= (level_value + tolerance)
 
     def _trigger_alert(self, asset_data: AssetData, level_type: LevelType, level_value: float, candle: CandleData):
         self.logger.info(f"ALERT: {asset_data.name} touched {level_type.value} at {level_value:.2f}")
@@ -148,4 +167,6 @@ class CPRAlertBot:
 
     def stop_monitoring(self):
         self.is_running = False
+        if self.fyers_service.websocket:
+            self.fyers_service.websocket.stop_running()
         self.logger.info("Monitoring stopped.")
