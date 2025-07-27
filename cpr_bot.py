@@ -90,17 +90,13 @@ class CPRAlertBot:
         self.is_running = True
         self.logger.info(f"✅ Starting WebSocket monitoring for {len(self.asset_data)} assets.")
 
-        # Get the list of symbols to subscribe to
         symbols_to_monitor = list(self.asset_data.keys())
 
-        # Start the websocket and pass our data handling function as the callback
         self.fyers_service.start_websocket(
             symbols=symbols_to_monitor,
             on_message_callback=self.on_live_data
         )
 
-        # The bot will now run indefinitely, driven by WebSocket events.
-        # We can add a simple loop here to keep the main thread alive.
         while self.is_running:
             time.sleep(1)
 
@@ -111,16 +107,17 @@ class CPRAlertBot:
         try:
             market_status = DateHelper.get_market_status()
             if market_status != MarketStatus.OPEN:
-                return # Ignore messages outside of market hours
+                return
 
-            symbol = message["symbol"]
-            ltp = message["ltp"]
+            symbol = message.get("symbol")
+            ltp = message.get("ltp")
 
-            # Since we get live ticks (LTP), we treat open, high, low, and close as the same value.
-            # We create a pseudo-candle for our existing logic to work.
+            if not symbol or not ltp:
+                return
+
             tick_as_candle = CandleData(
                 timestamp=int(time.time()),
-                open=ltp, high=ltp, low=ltp, close=ltp, volume=message.get("v", 0)
+                open=ltp, high=ltp, low=ltp, close=ltp, volume=message.get("vol_traded_today", 0)
             )
 
             asset_data = self.asset_data.get(symbol)
@@ -137,14 +134,11 @@ class CPRAlertBot:
                 if self._is_level_touched(tick_as_candle, level_value) and self.cooldown_manager.can_send_alert(symbol):
                     self._trigger_alert(asset_data, level_type, level_value, tick_as_candle)
                     self.cooldown_manager.record_alert_sent(symbol)
-                    break
+                    break # Move to the next symbol after an alert
         except Exception as e:
             self.logger.error(f"Error processing live data for {message.get('symbol')}: {e}", exc_info=True)
 
-
     def _is_level_touched(self, candle: CandleData, level_value: float) -> bool:
-        # For a live tick, high and low are the same (the LTP).
-        # We check if the level is within the tolerance of the current price.
         tolerance = level_value * (self.tolerance_percent / 100)
         return (level_value - tolerance) <= candle.close <= (level_value + tolerance)
 

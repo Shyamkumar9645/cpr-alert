@@ -1,5 +1,6 @@
 from datetime import date, timedelta, datetime, time
 from core.data_classes import MarketStatus
+import pytz
 
 class DateHelper:
     @staticmethod
@@ -24,7 +25,8 @@ class DateHelper:
         """
         Checks if the Indian stock market is currently open.
         """
-        now = datetime.now().time()
+        IST = pytz.timezone('Asia/Kolkata')
+        now = datetime.now(IST).time()
         market_open = time(9, 15)
         market_close = time(15, 30)
 

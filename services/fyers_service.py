@@ -37,8 +37,13 @@ class FyersService:
         data_type = "SymbolUpdate"
 
         def on_message(message):
-            if isinstance(message, list) and len(message) > 0 and "ltp" in message[0]:
-                on_message_callback(message[0])
+            # --- MODIFIED LINE ---
+            # Process messages if they are for Stocks ('sf') or Indices ('if')
+            if isinstance(message, dict) and message.get('type') in ['sf', 'if']:
+                on_message_callback(message)
+            else:
+                # Log other messages (like connection status) for info, but don't process
+                self.logger.info(f"WEBSOCKET INFO: {message.get('message', message)}")
 
         def on_error(message):
             self.logger.error(f"WebSocket Error: {message}")
@@ -48,9 +53,7 @@ class FyersService:
 
         def on_open():
             self.logger.info("WebSocket connection established. Subscribing to symbols...")
-            # --- THE FIX: Changed 'symbol=' to 'symbols=' ---
             self.websocket.subscribe(symbols=symbols, data_type=data_type)
-            # --- END OF FIX ---
             self.websocket.keep_running()
 
         self.websocket = FyersDataSocket(
@@ -63,8 +66,6 @@ class FyersService:
         )
 
         self.websocket.connect()
-
-    # ... (the rest of the file remains the same)
 
     def generate_access_token(self) -> Optional[str]:
         session = fyersModel.SessionModel(
