@@ -51,5 +51,4 @@ Thumbs.db
 .render/
 
 # Config files with secrets
-config*.json
 !config-sample.json
