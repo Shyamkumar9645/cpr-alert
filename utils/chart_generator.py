@@ -44,15 +44,27 @@ class ChartGenerator:
             mc = mpf.make_marketcolors(up='#26a69a', down='#ef5350', edge='inherit', wick={'up': '#26a69a', 'down': '#ef5350'})
             style = mpf.make_mpf_style(base_mpf_style='yahoo', marketcolors=mc, gridstyle='-', gridcolor='#E0E0E0')
 
+            # Determine how many candles to show
+            total_candles = len(df)
+            max_candles = 90  # Maximum candles to show
+
+            # If we have more candles than max_candles, show the last max_candles
+            # If we have fewer, show all available candles
+            candles_to_show = min(total_candles, max_candles)
+            chart_data = df.tail(candles_to_show)
+
+            self.logger.info(f"Displaying {len(chart_data)} candles out of {total_candles} available for {asset_name}")
+
             # Set volume=False to remove the volume panel from the chart.
             fig, axes = mpf.plot(
-                df.tail(80), type='candle', style=style, title='', volume=False,
+                chart_data, type='candle', style=style, title='', volume=False,
                 hlines=hlines, figsize=(12, 6), returnfig=True, # Reduced height since volume is gone
                 datetime_format='%H:%M', xrotation=0
             )
 
             ax = axes[0]
-            ax.set_title(f'{asset_name} - 5min CPR (IST)', loc='left', fontdict={'fontsize': 14, 'fontweight': 'bold'})
+            ax.set_title(f'{asset_name} - 5min CPR (IST) [{len(chart_data)} candles]',
+                         loc='left', fontdict={'fontsize': 14, 'fontweight': 'bold'})
             ax.text(0.98, 0.98, f'R1: {cpr_levels.r1:.2f} | P: {cpr_levels.pivot:.2f} | S1: {cpr_levels.s1:.2f}',
                     transform=ax.transAxes, ha='right', va='top', fontsize=10)
             ax.text(0.98, 0.90, f'{current_level.value} Alert @ {current_price:.2f}', # Adjusted y-position slightly

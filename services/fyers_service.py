@@ -122,20 +122,59 @@ class FyersService:
             return None
 
     def get_historical_data_for_chart(self, symbol: str) -> Optional[List[CandleData]]:
+        """
+        Fetches historical data ensuring we get at least 80-90 candles for charting.
+        Will go back further in time if needed to get sufficient data.
+        """
         chart_config = ConfigManager.load_config().get('chart_settings', {})
-        days_to_fetch = chart_config.get('historical_days', 2)
+        target_candles = chart_config.get('target_candles', 85)  # Target 85 candles
+        max_days_back = chart_config.get('max_days_back', 10)  # Maximum days to look back
+
         end_date = date.today()
-        start_date = end_date - timedelta(days=days_to_fetch)
-        data = {
-            "symbol": symbol, "resolution": "5", "date_format": "1",
-            "range_from": start_date.strftime('%Y-%m-%d'),
-            "range_to": end_date.strftime('%Y-%m-%d'),
-            "cont_flag": "1"
-        }
-        try:
-            response = self.fyers.history(data=data)
-            if response.get('code') == 200 and response.get('candles'):
-                return [CandleData(timestamp=c[0], open=c[1], high=c[2], low=c[3], close=c[4], volume=c[5]) for c in response['candles']]
-        except Exception as e:
-            self.logger.error(f"Error fetching chart data for {symbol}: {e}")
-            return None
+
+        # Start with 3 days and progressively increase if we don't have enough candles
+        for days_back in range(3, max_days_back + 1):
+            start_date = end_date - timedelta(days=days_back)
+
+            data = {
+                "symbol": symbol,
+                "resolution": "5",
+                "date_format": "1",
+                "range_from": start_date.strftime('%Y-%m-%d'),
+                "range_to": end_date.strftime('%Y-%m-%d'),
+                "cont_flag": "1"
+            }
+
+            try:
+                response = self.fyers.history(data=data)
+                if response.get('code') == 200 and response.get('candles'):
+                    candles_data = [
+                        CandleData(
+                            timestamp=c[0],
+                            open=c[1],
+                            high=c[2],
+                            low=c[3],
+                            close=c[4],
+                            volume=c[5]
+                        ) for c in response['candles']
+                    ]
+
+                    # If we have enough candles, return them
+                    if len(candles_data) >= target_candles:
+                        self.logger.info(f"Fetched {len(candles_data)} candles for {symbol} (target: {target_candles})")
+                        return candles_data
+
+                    # If this is our last attempt, return whatever we have
+                    elif days_back == max_days_back:
+                        self.logger.warning(f"Only found {len(candles_data)} candles for {symbol} after {days_back} days")
+                        return candles_data
+
+                else:
+                    self.logger.error(f"API Error fetching chart data for {symbol}: {response.get('message')}")
+
+            except Exception as e:
+                self.logger.error(f"Error fetching chart data for {symbol} (attempt {days_back} days): {e}")
+
+        # If all attempts failed, return None
+        self.logger.error(f"Failed to fetch sufficient chart data for {symbol}")
+        return None
