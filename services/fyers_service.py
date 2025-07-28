@@ -37,12 +37,9 @@ class FyersService:
         data_type = "SymbolUpdate"
 
         def on_message(message):
-            # --- MODIFIED LINE ---
-            # Process messages if they are for Stocks ('sf') or Indices ('if')
             if isinstance(message, dict) and message.get('type') in ['sf', 'if']:
                 on_message_callback(message)
             else:
-                # Log other messages (like connection status) for info, but don't process
                 self.logger.info(f"WEBSOCKET INFO: {message.get('message', message)}")
 
         def on_error(message):
@@ -93,33 +90,122 @@ class FyersService:
             self.logger.error(f"Token generation failed: {response.get('message', 'Unknown error')}")
             return None
 
-    def get_ohlc_from_intraday(self, symbol: str, target_date: date) -> Optional[OHLCData]:
+    def get_ohlc_from_daily_data(self, symbol: str, target_date: date) -> Optional[OHLCData]:
+        """
+        Fetches OHLC data using daily resolution for more accurate results.
+        Falls back to intraday method if daily data is not available.
+        """
+        # First try to get daily OHLC data
         data = {
-            "symbol": symbol, "resolution": "5", "date_format": "1",
+            "symbol": symbol,
+            "resolution": "D",  # Daily resolution
+            "date_format": "1",
             "range_from": target_date.strftime('%Y-%m-%d'),
             "range_to": target_date.strftime('%Y-%m-%d'),
             "cont_flag": "1"
         }
+
         try:
             response = self.fyers.history(data=data)
             if response.get('code') == 200 and response.get('candles'):
                 candles = response['candles']
-                if not candles:
-                    self.logger.warning(f"No intraday candles found for {symbol} on {target_date}.")
-                    return None
+                if candles and len(candles) > 0:
+                    # Daily candle format: [timestamp, open, high, low, close, volume]
+                    daily_candle = candles[0]  # Should be only one candle for the specific date
 
-                day_open = candles[0][1]
-                day_high = max(c[2] for c in candles)
-                day_low = min(c[3] for c in candles)
-                day_close = candles[-1][4]
+                    ohlc = OHLCData(
+                        open=daily_candle[1],
+                        high=daily_candle[2],
+                        low=daily_candle[3],
+                        close=daily_candle[4]
+                    )
 
-                return OHLCData(open=day_open, high=day_high, low=day_low, close=day_close)
+                    self.logger.info(f"Fetched daily OHLC for {symbol} on {target_date}: "
+                                     f"O:{ohlc.open:.2f} H:{ohlc.high:.2f} L:{ohlc.low:.2f} C:{ohlc.close:.2f}")
+                    return ohlc
+                else:
+                    self.logger.warning(f"No daily candle found for {symbol} on {target_date}")
             else:
-                self.logger.error(f"API Error fetching intraday for {symbol}: {response.get('message')}")
-                return None
+                self.logger.warning(f"Daily data API response for {symbol}: {response.get('message', 'Unknown error')}")
+
         except Exception as e:
-            self.logger.error(f"Exception while fetching intraday for {symbol}: {e}", exc_info=True)
-            return None
+            self.logger.error(f"Exception while fetching daily data for {symbol}: {e}")
+
+        # Fallback to intraday method if daily data is not available
+        self.logger.info(f"Falling back to intraday method for {symbol}")
+        return self.get_ohlc_from_intraday_fallback(symbol, target_date)
+
+    def get_ohlc_from_intraday_fallback(self, symbol: str, target_date: date) -> Optional[OHLCData]:
+        """
+        Fallback method: Calculate OHLC from intraday data with improved accuracy.
+        """
+        # Use 1-minute data for more accuracy, fall back to 5-minute if needed
+        for resolution in ["1", "5"]:
+            data = {
+                "symbol": symbol,
+                "resolution": resolution,
+                "date_format": "1",
+                "range_from": target_date.strftime('%Y-%m-%d'),
+                "range_to": target_date.strftime('%Y-%m-%d'),
+                "cont_flag": "1"
+            }
+
+            try:
+                response = self.fyers.history(data=data)
+                if response.get('code') == 200 and response.get('candles'):
+                    candles = response['candles']
+                    if not candles:
+                        continue
+
+                    # Filter candles to ensure they are within market hours (9:15 AM to 3:30 PM IST)
+                    # Timestamps are in epoch seconds
+                    import pytz
+                    ist = pytz.timezone('Asia/Kolkata')
+
+                    filtered_candles = []
+                    for candle in candles:
+                        # Convert timestamp to IST datetime
+                        candle_time = pd.to_datetime(candle[0], unit='s', utc=True).tz_convert(ist)
+                        candle_hour_min = candle_time.hour * 100 + candle_time.minute
+
+                        # Market hours: 9:15 AM (915) to 3:30 PM (1530)
+                        if 915 <= candle_hour_min <= 1530:
+                            filtered_candles.append(candle)
+
+                    if not filtered_candles:
+                        self.logger.warning(f"No {resolution}-min candles found within market hours for {symbol} on {target_date}")
+                        continue
+
+                    # Calculate OHLC from filtered candles
+                    day_open = filtered_candles[0][1]  # Open of first candle
+                    day_high = max(c[2] for c in filtered_candles)  # Highest high
+                    day_low = min(c[3] for c in filtered_candles)   # Lowest low
+                    day_close = filtered_candles[-1][4]  # Close of last candle
+
+                    ohlc = OHLCData(open=day_open, high=day_high, low=day_low, close=day_close)
+
+                    self.logger.info(f"Calculated OHLC from {resolution}-min data for {symbol} on {target_date}: "
+                                     f"O:{ohlc.open:.2f} H:{ohlc.high:.2f} L:{ohlc.low:.2f} C:{ohlc.close:.2f} "
+                                     f"({len(filtered_candles)} candles)")
+                    return ohlc
+
+                else:
+                    self.logger.warning(f"Failed to fetch {resolution}-min data for {symbol}: {response.get('message')}")
+
+            except Exception as e:
+                self.logger.error(f"Exception while fetching {resolution}-min data for {symbol}: {e}")
+                import pandas as pd  # Import here to avoid issues if not available
+                continue
+
+        # If all methods fail
+        self.logger.error(f"Failed to calculate OHLC for {symbol} on {target_date} using all methods")
+        return None
+
+    def get_ohlc_from_intraday(self, symbol: str, target_date: date) -> Optional[OHLCData]:
+        """
+        Main method to get OHLC data. Now uses the improved daily data method.
+        """
+        return self.get_ohlc_from_daily_data(symbol, target_date)
 
     def get_historical_data_for_chart(self, symbol: str) -> Optional[List[CandleData]]:
         """
@@ -161,7 +247,6 @@ class FyersService:
 
                     # If we have enough candles, return them
                     if len(candles_data) >= target_candles:
-                        self.logger.info(f"Fetched {len(candles_data)} candles for {symbol} (target: {target_candles})")
                         return candles_data
 
                     # If this is our last attempt, return whatever we have
