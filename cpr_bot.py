@@ -41,6 +41,38 @@ class CPRAlertBot:
         self._lock = Lock()
         self.logger = logging.getLogger(__name__)
 
+    def _is_index_symbol(self, symbol: str) -> bool:
+        """
+        Determines if a symbol is an index based on the symbol format.
+        Returns True for indexes, False for stocks.
+        """
+        index_patterns = [
+            '-INDEX',  # NIFTY50-INDEX, NIFTYBANK-INDEX, etc.
+            'SENSEX-INDEX',
+            'FINNIFTY-INDEX'
+        ]
+        return any(pattern in symbol for pattern in index_patterns)
+
+    def _get_alert_levels_for_symbol(self, symbol: str, levels: CPRCalculator) -> Dict[LevelType, float]:
+        """
+        Returns the appropriate alert levels based on whether the symbol is an index or stock.
+        - Indexes: CPR (Pivot), S1, R1
+        - Stocks: Only S1, R1 (no CPR/Pivot alerts)
+        """
+        if self._is_index_symbol(symbol):
+            # For indexes: alert on all three levels
+            return {
+                LevelType.R1: levels.r1,
+                LevelType.PIVOT: levels.pivot,  # CPR level
+                LevelType.S1: levels.s1,
+            }
+        else:
+            # For stocks: alert only on S1 and R1, skip CPR/Pivot
+            return {
+                LevelType.R1: levels.r1,
+                LevelType.S1: levels.s1,
+            }
+
     def initialize_daily_levels(self) -> bool:
         self.logger.info("Initializing CPR levels for all assets...")
         target_date = DateHelper.get_previous_trading_day()
@@ -51,9 +83,19 @@ class CPRAlertBot:
             return False
 
         success_count = 0
+        index_count = 0
+        stock_count = 0
+
         for symbol in symbols_list:
             name = symbol.split(':')[-1].replace('-EQ', '')
-            self.logger.info(f"Processing {name}")
+            is_index = self._is_index_symbol(symbol)
+
+            if is_index:
+                index_count += 1
+                self.logger.info(f"Processing INDEX: {name}")
+            else:
+                stock_count += 1
+                self.logger.info(f"Processing STOCK: {name}")
 
             ohlc = self.fyers_service.get_ohlc_from_intraday(symbol, target_date)
 
@@ -62,20 +104,27 @@ class CPRAlertBot:
                 self.asset_data[symbol] = AssetData(name=name, symbol=symbol, levels=levels, source_data=ohlc)
                 self.db_service.save_daily_levels(symbol, target_date.strftime('%Y-%m-%d'), levels, ohlc)
                 success_count += 1
-                self.logger.info(f"Successfully calculated CPR levels for {name}")
+
+                # Log which levels will trigger alerts
+                alert_levels = self._get_alert_levels_for_symbol(symbol, levels)
+                level_names = [lt.value for lt in alert_levels.keys()]
+                self.logger.info(f"✅ {name} - Alert levels: {', '.join(level_names)}")
             else:
                 self.logger.error(f"Failed to calculate historical OHLC for {name} on {target_date}")
 
         if success_count > 0:
-            self._send_daily_summary(target_date)
+            self._send_daily_summary(target_date, index_count, stock_count)
             return True
         else:
             self.logger.error("Could not calculate CPR levels for ANY asset. Bot will not start.")
             return False
 
-    def _send_daily_summary(self, calculation_date: date):
+    def _send_daily_summary(self, calculation_date: date, index_count: int, stock_count: int):
         summary_msg = f"🎯 *Daily CPR Levels Initialized*\n"
-        summary_msg += f"_Based on {calculation_date.strftime('%Y-%m-%d')} data for {len(self.asset_data)} assets._"
+        summary_msg += f"_Based on {calculation_date.strftime('%Y-%m-%d')} data_\n\n"
+        summary_msg += f"📊 Indexes: {index_count} (CPR + S1/R1 alerts)\n"
+        summary_msg += f"📈 Stocks: {stock_count} (S1/R1 alerts only)\n"
+        summary_msg += f"🎯 Total assets: {len(self.asset_data)}"
         self.telegram_service.send_alert(summary_msg)
 
     def start_monitoring(self):
@@ -103,6 +152,7 @@ class CPRAlertBot:
     def on_live_data(self, message: Dict):
         """
         This method is called by the FyersService every time a new price tick arrives.
+        Modified to handle different alert levels for indexes vs stocks.
         """
         try:
             market_status = DateHelper.get_market_status()
@@ -124,14 +174,14 @@ class CPRAlertBot:
             if not asset_data:
                 return
 
-            key_levels = {
-                LevelType.R1: asset_data.levels.r1,
-                LevelType.PIVOT: asset_data.levels.pivot,
-                LevelType.S1: asset_data.levels.s1,
-            }
+            # Get the appropriate alert levels for this symbol (index vs stock)
+            key_levels = self._get_alert_levels_for_symbol(symbol, asset_data.levels)
 
             for level_type, level_value in key_levels.items():
                 if self._is_level_touched(tick_as_candle, level_value) and self.cooldown_manager.can_send_alert(symbol):
+                    asset_type = "INDEX" if self._is_index_symbol(symbol) else "STOCK"
+                    self.logger.info(f"🚨 {asset_type} ALERT: {asset_data.name} touched {level_type.value} at {level_value:.2f}")
+
                     self._trigger_alert(asset_data, level_type, level_value, tick_as_candle)
                     self.cooldown_manager.record_alert_sent(symbol)
                     break # Move to the next symbol after an alert
@@ -143,7 +193,9 @@ class CPRAlertBot:
         return (level_value - tolerance) <= candle.close <= (level_value + tolerance)
 
     def _trigger_alert(self, asset_data: AssetData, level_type: LevelType, level_value: float, candle: CandleData):
-        self.logger.info(f"ALERT: {asset_data.name} touched {level_type.value} at {level_value:.2f}")
+        # Add asset type to the log message
+        asset_type = "INDEX" if self._is_index_symbol(asset_data.symbol) else "STOCK"
+        self.logger.info(f"ALERT: {asset_type} {asset_data.name} touched {level_type.value} at {level_value:.2f}")
 
         chart_buffer = None
         chart_config = self.config.get('chart_settings', {})
