@@ -4,89 +4,77 @@ import subprocess
 import logging
 
 # Setup basic logging
-# This can be at the top as it only uses standard libraries
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-# --- Python Path Fix ---
-# This is also fine at the top level
+# Python Path Fix
 project_root = os.path.dirname(os.path.abspath(__file__))
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
-# -----------------------
 
 def install_dependencies():
     """Installs required packages from requirements.txt quietly."""
     logging.info("Checking and installing dependencies...")
     try:
-        # Using check_call to ensure the command succeeds
         subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", "-r", "requirements.txt"])
         logging.info("Dependencies are up to date.")
     except subprocess.CalledProcessError as e:
         logging.error(f"Failed to install dependencies: {e}")
-        # Exit if dependencies can't be installed, as the rest of the script will fail
         sys.exit(1)
     except FileNotFoundError:
         logging.error("ERROR: requirements.txt not found. Please ensure the file exists.")
         sys.exit(1)
 
-
-def manage_fyers_token():
+def ensure_automated_token():
     """
-    Checks for the Fyers access token in the environment variables.
-    If not found, guides the user through generating one.
+    Ensures we have a valid token using the automated token manager.
+    No more manual token generation required!
     """
-    # Import necessary modules inside the function
-    from utils.config_manager import ConfigManager
-    from services.fyers_service import FyersService
+    from utils.auto_token_manager import AutoTokenManager
 
-    config = ConfigManager.load_config()
-    fyers_creds = config['fyers_credentials']
+    try:
+        logging.info("🤖 Using automated token management system...")
+        token_manager = AutoTokenManager()
 
-    # Check for the access token; note that getenv might return None or an empty string
-    if fyers_creds.get('access_token'):
-        logging.info("Fyers access token found in .env file.")
-        return
+        # Get valid token (will auto-renew if needed)
+        access_token = token_manager.get_valid_token()
 
-    logging.warning("Fyers access token not found in .env file. Starting generation process...")
+        if access_token:
+            logging.info("✅ Valid Fyers token obtained automatically")
+            return True
+        else:
+            logging.error("❌ Automated token generation failed")
+            logging.error("Please run 'python setup_automated_tokens.py' for first-time setup")
+            return False
 
-    # Temporarily create a service instance without a token to run the generation method
-    temp_fyers_service = FyersService(fyers_creds)
-    new_token = temp_fyers_service.generate_access_token()
-
-    if new_token:
-        print("\n" + "="*60)
-        print("✅ TOKEN GENERATED SUCCESSFULLY")
-        print("Please copy the following line and add it to your .env file:")
-        print(f"\nFYERS_ACCESS_TOKEN={new_token}\n")
-        print("="*60 + "\n")
-        logging.info("Exiting now. Please add the token to your .env file and restart the bot.")
-    else:
-        logging.error("Could not generate a new token. Please try again.")
-
-    # Exit after token generation guidance so the user can update the .env file
-    sys.exit(1)
+    except Exception as e:
+        logging.error(f"Token management error: {e}")
+        logging.error("Please run 'python setup_automated_tokens.py' for first-time setup")
+        return False
 
 def start_bot():
     """Initializes and starts the CPR Alert Bot."""
     logging.info("Starting the CPR Alert Bot application...")
-    # Import the bot class here, after dependencies are confirmed to be installed
     from cpr_bot import CPRAlertBot
 
     bot = CPRAlertBot()
     if bot.initialize_daily_levels():
+        logging.info("🚀 Bot initialized successfully - starting monitoring...")
         bot.start_monitoring()
     else:
         logging.error("Failed to initialize bot. Exiting.")
         sys.exit(1)
 
 if __name__ == "__main__":
-    # --- Critical Step 1: Install dependencies ---
-    # This MUST be the first thing to run to ensure all required modules are available.
+    # Create logs directory
+    os.makedirs("logs", exist_ok=True)
+
+    # Step 1: Install dependencies
     install_dependencies()
 
-    # --- Step 2: Manage secrets and configurations ---
-    # Now that dependencies are installed, we can safely call functions that import them.
-    manage_fyers_token()
+    # Step 2: Ensure we have a valid token (automated)
+    if not ensure_automated_token():
+        logging.error("Cannot start bot without valid token. Exiting.")
+        sys.exit(1)
 
-    # --- Step 3: Start the main application logic ---
+    # Step 3: Start the bot
     start_bot()

@@ -7,6 +7,7 @@ from fyers_apiv3.FyersWebsocket.data_ws import FyersDataSocket
 
 from core.data_classes import OHLCData, CandleData
 from utils.config_manager import ConfigManager
+from utils.auto_token_manager import AutoTokenManager
 
 class FyersService:
     def __init__(self, config: dict):
@@ -14,23 +15,93 @@ class FyersService:
         self.client_id = config.get('app_id')
         self.secret_key = config.get('secret_key')
         self.redirect_uri = config.get('redirect_uri')
-        self.access_token = config.get('access_token')
         self.log_path = config.get('log_path', './logs')
-        self.fyers = self._create_client()
+
+        # Initialize token manager
+        self.token_manager = AutoTokenManager()
+        self.access_token = None
+        self.fyers = None
         self.websocket = None
         self.logger = logging.getLogger(__name__)
 
+        # Get valid token on initialization
+        self._ensure_valid_token()
+
+    def _ensure_valid_token(self) -> bool:
+        """Ensure we have a valid access token."""
+        try:
+            self.access_token = self.token_manager.get_valid_token()
+            if self.access_token:
+                self.fyers = self._create_client()
+                self.logger.info("✅ Valid Fyers token obtained")
+                return True
+            else:
+                self.logger.error("❌ Failed to obtain valid Fyers token")
+                return False
+        except Exception as e:
+            self.logger.error(f"Error ensuring valid token: {e}")
+            return False
+
     def _create_client(self) -> fyersModel.FyersModel:
+        """Create Fyers client with current access token."""
         return fyersModel.FyersModel(
             client_id=self.client_id,
             token=self.access_token,
             log_path=self.log_path
         )
 
+    def _refresh_token_if_needed(self):
+        """Refresh token if API calls are failing."""
+        self.logger.info("Attempting to refresh access token...")
+        old_token = self.access_token
+
+        if self._ensure_valid_token() and self.access_token != old_token:
+            self.logger.info("✅ Token refreshed successfully")
+            return True
+
+        self.logger.error("❌ Token refresh failed")
+        return False
+
+    def _make_api_call_with_retry(self, api_call_func, *args, **kwargs):
+        """Make API call with automatic token refresh on failure."""
+        try:
+            # First attempt
+            result = api_call_func(*args, **kwargs)
+
+            # Check if the call was successful
+            if isinstance(result, dict) and result.get('s') == 'ok':
+                return result
+            elif isinstance(result, dict) and result.get('code') == 200:
+                return result
+            else:
+                # API call failed, might be due to expired token
+                self.logger.warning(f"API call failed: {result}")
+
+                # Try to refresh token and retry once
+                if self._refresh_token_if_needed():
+                    self.logger.info("Retrying API call with new token...")
+                    return api_call_func(*args, **kwargs)
+                else:
+                    return result
+
+        except Exception as e:
+            self.logger.error(f"API call exception: {e}")
+
+            # Try to refresh token and retry once
+            if "token" in str(e).lower() or "auth" in str(e).lower():
+                if self._refresh_token_if_needed():
+                    self.logger.info("Retrying API call after token refresh...")
+                    try:
+                        return api_call_func(*args, **kwargs)
+                    except Exception as retry_e:
+                        self.logger.error(f"Retry failed: {retry_e}")
+                        raise retry_e
+            raise e
+
     def start_websocket(self, symbols: List[str], on_message_callback: Callable):
         """Initializes and connects to the Fyers Data WebSocket."""
-        if not self.access_token:
-            self.logger.error("Cannot start WebSocket without an access token.")
+        if not self._ensure_valid_token():
+            self.logger.error("Cannot start WebSocket without a valid access token.")
             return
 
         ws_access_token = f"{self.client_id}:{self.access_token}"
@@ -44,6 +115,13 @@ class FyersService:
 
         def on_error(message):
             self.logger.error(f"WebSocket Error: {message}")
+
+            # If it's a token-related error, try to refresh and reconnect
+            if "token" in str(message).lower() or "auth" in str(message).lower():
+                self.logger.info("Token-related WebSocket error. Attempting to reconnect...")
+                if self._refresh_token_if_needed():
+                    # Reconnect with new token
+                    self.start_websocket(symbols, on_message_callback)
 
         def on_close(message):
             self.logger.warning(f"WebSocket Connection Closed: {message}")
@@ -65,40 +143,16 @@ class FyersService:
         self.websocket.connect()
 
     def generate_access_token(self) -> Optional[str]:
-        session = fyersModel.SessionModel(
-            client_id=self.client_id,
-            secret_key=self.secret_key,
-            redirect_uri=self.redirect_uri,
-            response_type="code",
-            grant_type="authorization_code"
-        )
-        auth_url = session.generate_authcode()
-        print(f"Login URL: {auth_url}")
-
-        try:
-            auth_code = input("Please enter the auth code generated after logging in: ")
-        except EOFError:
-            self.logger.error("Could not read auth code. Please run in an interactive terminal.")
-            return None
-
-        session.set_token(auth_code)
-        response = session.generate_token()
-
-        if response and 'access_token' in response:
-            return response['access_token']
-        else:
-            self.logger.error(f"Token generation failed: {response.get('message', 'Unknown error')}")
-            return None
+        """Legacy method - now uses automated token manager."""
+        return self.token_manager.get_valid_token()
 
     def get_ohlc_from_daily_data(self, symbol: str, target_date: date) -> Optional[OHLCData]:
         """
-        Fetches OHLC data using daily resolution for more accurate results.
-        Falls back to intraday method if daily data is not available.
+        Fetches OHLC data using daily resolution with automatic token refresh.
         """
-        # First try to get daily OHLC data
         data = {
             "symbol": symbol,
-            "resolution": "D",  # Daily resolution
+            "resolution": "D",
             "date_format": "1",
             "range_from": target_date.strftime('%Y-%m-%d'),
             "range_to": target_date.strftime('%Y-%m-%d'),
@@ -106,12 +160,12 @@ class FyersService:
         }
 
         try:
-            response = self.fyers.history(data=data)
+            response = self._make_api_call_with_retry(self.fyers.history, data=data)
+
             if response.get('code') == 200 and response.get('candles'):
                 candles = response['candles']
                 if candles and len(candles) > 0:
-                    # Daily candle format: [timestamp, open, high, low, close, volume]
-                    daily_candle = candles[0]  # Should be only one candle for the specific date
+                    daily_candle = candles[0]
 
                     ohlc = OHLCData(
                         open=daily_candle[1],
@@ -131,15 +185,12 @@ class FyersService:
         except Exception as e:
             self.logger.error(f"Exception while fetching daily data for {symbol}: {e}")
 
-        # Fallback to intraday method if daily data is not available
+        # Fallback to intraday method
         self.logger.info(f"Falling back to intraday method for {symbol}")
         return self.get_ohlc_from_intraday_fallback(symbol, target_date)
 
     def get_ohlc_from_intraday_fallback(self, symbol: str, target_date: date) -> Optional[OHLCData]:
-        """
-        Fallback method: Calculate OHLC from intraday data with improved accuracy.
-        """
-        # Use 1-minute data for more accuracy, fall back to 5-minute if needed
+        """Fallback method with automatic token refresh."""
         for resolution in ["1", "5"]:
             data = {
                 "symbol": symbol,
@@ -151,74 +202,60 @@ class FyersService:
             }
 
             try:
-                response = self.fyers.history(data=data)
+                response = self._make_api_call_with_retry(self.fyers.history, data=data)
+
                 if response.get('code') == 200 and response.get('candles'):
                     candles = response['candles']
                     if not candles:
                         continue
 
-                    # Filter candles to ensure they are within market hours (9:15 AM to 3:30 PM IST)
-                    # Timestamps are in epoch seconds
+                    # Filter candles within market hours
                     import pytz
-                    ist = pytz.timezone('Asia/Kolkata')
+                    import pandas as pd
 
+                    ist = pytz.timezone('Asia/Kolkata')
                     filtered_candles = []
+
                     for candle in candles:
-                        # Convert timestamp to IST datetime
                         candle_time = pd.to_datetime(candle[0], unit='s', utc=True).tz_convert(ist)
                         candle_hour_min = candle_time.hour * 100 + candle_time.minute
 
-                        # Market hours: 9:15 AM (915) to 3:30 PM (1530)
                         if 915 <= candle_hour_min <= 1530:
                             filtered_candles.append(candle)
 
                     if not filtered_candles:
-                        self.logger.warning(f"No {resolution}-min candles found within market hours for {symbol} on {target_date}")
                         continue
 
-                    # Calculate OHLC from filtered candles
-                    day_open = filtered_candles[0][1]  # Open of first candle
-                    day_high = max(c[2] for c in filtered_candles)  # Highest high
-                    day_low = min(c[3] for c in filtered_candles)   # Lowest low
-                    day_close = filtered_candles[-1][4]  # Close of last candle
+                    # Calculate OHLC
+                    day_open = filtered_candles[0][1]
+                    day_high = max(c[2] for c in filtered_candles)
+                    day_low = min(c[3] for c in filtered_candles)
+                    day_close = filtered_candles[-1][4]
 
                     ohlc = OHLCData(open=day_open, high=day_high, low=day_low, close=day_close)
 
-                    self.logger.info(f"Calculated OHLC from {resolution}-min data for {symbol} on {target_date}: "
-                                     f"O:{ohlc.open:.2f} H:{ohlc.high:.2f} L:{ohlc.low:.2f} C:{ohlc.close:.2f} "
-                                     f"({len(filtered_candles)} candles)")
+                    self.logger.info(f"Calculated OHLC from {resolution}-min data for {symbol}: "
+                                     f"O:{ohlc.open:.2f} H:{ohlc.high:.2f} L:{ohlc.low:.2f} C:{ohlc.close:.2f}")
                     return ohlc
 
-                else:
-                    self.logger.warning(f"Failed to fetch {resolution}-min data for {symbol}: {response.get('message')}")
-
             except Exception as e:
-                self.logger.error(f"Exception while fetching {resolution}-min data for {symbol}: {e}")
-                import pandas as pd  # Import here to avoid issues if not available
+                self.logger.error(f"Exception fetching {resolution}-min data for {symbol}: {e}")
                 continue
 
-        # If all methods fail
-        self.logger.error(f"Failed to calculate OHLC for {symbol} on {target_date} using all methods")
         return None
 
     def get_ohlc_from_intraday(self, symbol: str, target_date: date) -> Optional[OHLCData]:
-        """
-        Main method to get OHLC data. Now uses the improved daily data method.
-        """
+        """Main OHLC method."""
         return self.get_ohlc_from_daily_data(symbol, target_date)
 
     def get_historical_data_for_chart(self, symbol: str) -> Optional[List[CandleData]]:
-        """
-        Fetches historical data ensuring we get at least 80-90 candles for charting.
-        Will go back further in time if needed to get sufficient data.
-        """
+        """Fetches historical data with automatic token refresh."""
         chart_config = ConfigManager.load_config().get('chart_settings', {})
-        target_candles = chart_config.get('target_candles', 85)  # Target 85 candles
-        max_days_back = chart_config.get('max_days_back', 10)  # Maximum days to look back
+        target_candles = chart_config.get('target_candles', 85)
+        max_days_back = chart_config.get('max_days_back', 10)
 
         end_date = date.today()
 
-        # Start with 3 days and progressively increase if we don't have enough candles
         for days_back in range(3, max_days_back + 1):
             start_date = end_date - timedelta(days=days_back)
 
@@ -232,7 +269,8 @@ class FyersService:
             }
 
             try:
-                response = self.fyers.history(data=data)
+                response = self._make_api_call_with_retry(self.fyers.history, data=data)
+
                 if response.get('code') == 200 and response.get('candles'):
                     candles_data = [
                         CandleData(
@@ -245,21 +283,12 @@ class FyersService:
                         ) for c in response['candles']
                     ]
 
-                    # If we have enough candles, return them
                     if len(candles_data) >= target_candles:
                         return candles_data
-
-                    # If this is our last attempt, return whatever we have
                     elif days_back == max_days_back:
-                        self.logger.warning(f"Only found {len(candles_data)} candles for {symbol} after {days_back} days")
                         return candles_data
 
-                else:
-                    self.logger.error(f"API Error fetching chart data for {symbol}: {response.get('message')}")
-
             except Exception as e:
-                self.logger.error(f"Error fetching chart data for {symbol} (attempt {days_back} days): {e}")
+                self.logger.error(f"Error fetching chart data: {e}")
 
-        # If all attempts failed, return None
-        self.logger.error(f"Failed to fetch sufficient chart data for {symbol}")
         return None
